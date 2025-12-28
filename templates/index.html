@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <base href="{{ base_href }}">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kartu 41 - Game Online</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='img/favicon.ico') }}">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script>window.SOCKET_IO_PATH = "{{ socket_io_path }}";</script>
+</head>
+<body>
+    <div class="container">
+        <!-- Welcome Screen -->
+        <div id="welcomeScreen" class="screen active">
+            <div class="welcome-card">
+                <h1>🎴 KARTU 41 🎴</h1>
+                <p class="subtitle">Game Kartu Remi Online</p>
+                
+                <div class="rules-box">
+                    <h3>📋 Aturan Permainan:</h3>
+                    <ul>
+                        <li>Kumpulkan kartu bernilai <strong>41</strong> dengan jenis kartu yang sama</li>
+                        <li>Pemain: 2-6 orang</li>
+                        <li>Setiap pemain mendapat 4 kartu awal</li>
+                        <li>Ambil 1 kartu, buang 1 kartu setiap giliran</li>
+                        <li><strong>A</strong> = 11, <strong>J/Q/K</strong> = 10, Angka = sesuai nilai</li>
+                        <li>Jika kartu tidak sama jenisnya, nilai kartu beda jenis dikurangi</li>
+                    </ul>
+                </div>
+                
+                <div class="input-group">
+                    <input type="text" id="playerName" placeholder="Masukkan nama Anda" maxlength="15">
+                </div>
+                
+                <div class="button-group">
+                    <button class="btn btn-primary" onclick="createGame()">
+                        🎮 Buat Game Baru
+                    </button>
+                    <button class="btn btn-secondary" onclick="showJoinGame()">
+                        🚪 Gabung Game
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Join Game Screen -->
+        <div id="joinScreen" class="screen">
+            <div class="welcome-card">
+                <h2>Gabung Game</h2>
+                <div class="input-group">
+                    <input type="text" id="joinPlayerName" placeholder="Masukkan nama Anda" maxlength="15">
+                </div>
+                <div class="input-group">
+                    <input type="text" id="joinGameId" placeholder="Masukkan Game ID">
+                </div>
+                <div class="button-group">
+                    <button class="btn btn-primary" onclick="joinGame()">
+                        ✅ Gabung
+                    </button>
+                    <button class="btn btn-secondary" onclick="showWelcome()">
+                        ← Kembali
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Lobby Screen -->
+        <div id="lobbyScreen" class="screen">
+            <div class="lobby-card">
+                <h2>🎮 Lobby Game</h2>
+                <div class="game-info">
+                    <p><strong>Game ID:</strong> <span id="lobbyGameId" class="game-id"></span></p>
+                    <button class="btn-copy" onclick="copyGameId()">📋 Copy ID</button>
+                </div>
+                
+                <div class="players-list">
+                    <h3>👥 Pemain (<span id="playerCount">0</span>/6)</h3>
+                    <div id="playersList"></div>
+                </div>
+                
+                <div class="game-settings" id="gameSettings" style="margin: 20px 0; padding: 15px; background: rgba(255,255,255,0.1); border-radius: 10px; display: none;">
+                    <h3 style="margin-bottom: 15px; color: white;">⚙️ Pengaturan Game</h3>
+                    <div style="display: flex; align-items: center; justify-content: space-between;">
+                        <label style="color: white; font-size: 1em;">
+                            ⏱️ Mode Timer (20 detik per giliran)
+                        </label>
+                        <label class="timer-switch">
+                            <input type="checkbox" id="timerToggle" checked onchange="toggleTimerMode()">
+                            <span class="timer-slider"></span>
+                        </label>
+                    </div>
+                    <p style="color: #000000; font-size: 0.85em; margin-top: 10px; margin-bottom: 0;">
+                        Jika aktif, pemain hanya punya 20 detik untuk mengambil dan membuang kartu. Jika waktu habis, sistem akan otomatis mengambil dan membuang kartu.
+                    </p>
+                </div>
+                
+                <div class="button-group">
+                    <button class="btn btn-primary" onclick="startGame()" id="startButton">
+                        🚀 Mulai Game
+                    </button>
+                    <button class="btn btn-danger" onclick="leaveGame()">
+                        🚪 Keluar
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Game Screen -->
+        <div id="gameScreen" class="screen">
+            <div class="game-header">
+                <div class="game-info-bar">
+                    <div class="info-item">
+                        <span class="label">Game ID:</span>
+                        <span id="gameIdDisplay" class="value"></span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">Game ke:</span>
+                        <span id="roundNumber" class="value">1</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">Sisa Kartu:</span>
+                        <span id="deckCount" class="value">48</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">Giliran:</span>
+                        <span id="currentTurn" class="value"></span>
+                    </div>
+                    <div class="info-item" id="timerContainer" style="display: none;">
+                        <span class="label">⏱️ Waktu:</span>
+                        <span id="turnTimer" class="value" style="font-weight: bold; color: #28a745;">20</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="game-content">
+                <!-- Toggle Chat Button (untuk mobile) -->
+                <button class="chat-toggle-btn" id="chatToggleBtn" onclick="toggleChat()">
+                    💬 <span class="chat-badge" id="chatBadge" style="display: none;">0</span>
+                </button>
+
+                <!-- Chat Box -->
+                <div class="chat-box" id="chatBox">
+                    <div class="chat-header">
+                        <h4>💬 Chat</h4>
+                        <button class="chat-close-btn" onclick="toggleChat()">✕</button>
+                    </div>
+                    <div class="chat-messages" id="chatMessages"></div>
+                    <div class="chat-input-area">
+                        <input type="text" id="chatInput" placeholder="Ketik pesan..." maxlength="200">
+                        <button class="btn-send" onclick="sendMessage()">Kirim</button>
+                    </div>
+                </div>
+
+                <!-- Toast Notification untuk Chat -->
+                <div class="chat-toast" id="chatToast">
+                    <div class="toast-sender"></div>
+                    <div class="toast-message"></div>
+                </div>
+
+                <!-- Main Game Area -->
+                <div class="game-area-main">
+                    <!-- Deck Area -->
+                    <div class="deck-area">
+                    <div class="deck-card" onclick="drawCard(false)">
+                        <div class="card-back">
+                            <div class="deck-icon">🎴</div>
+                            <div class="deck-text">Ambil</div>
+                        </div>
+                    </div>
+                    
+                    <div id="discardPileArea" class="discard-pile-area" style="display: none;">
+                        <div class="discard-pile-card" id="discardPileCard">
+                            <!-- Kartu buangan akan ditampilkan di sini -->
+                        </div>
+                        <div class="discard-pile-label">Kartu Buangan</div>
+                    </div>
+                </div>
+
+                    <!-- Current Player Hand -->
+                    <div class="player-area">
+                        <div class="player-info">
+                            <h3 id="yourName"></h3>
+                        </div>
+                        <div class="hand-cards" id="yourHand"></div>
+                        <div class="action-buttons-container">
+                            <button id="discardButton" class="btn-discard" onclick="discardSelectedCard()" disabled>
+                                Buang Kartu
+                            </button>
+                            <button id="closeHandButton" class="btn-close-hand" onclick="closeSelectedHand()" disabled>
+                                Tutup Kartu
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Daftar Pemain (di bawah) -->
+                    <div class="other-players" id="otherPlayers"></div>
+                </div>
+                
+                <!-- Right Sidebar: Ranking Kumulatif -->
+                <div class="game-sidebar-right">
+                    <div id="cumulativeRanking"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Game Over Screen -->
+        <div id="gameOverScreen" class="screen">
+            <div class="gameover-card">
+                <h1 class="gameover-title">🏆 Game Selesai! 🏆</h1>
+                
+                <div id="winnerAnnouncement"></div>
+                
+                <div class="rankings">
+                    <h3>📊 Peringkat Game Ini</h3>
+                    <div id="rankingsList"></div>
+                </div>
+                
+                <div class="rankings" id="overallRankingsSection" style="margin-top: 30px;">
+                    <h3>🏅 Ranking Kumulatif</h3>
+                    <div id="overallRankingsList"></div>
+                </div>
+                
+                <div class="button-group">
+                    <button class="btn btn-primary" onclick="restartGame()">
+                        🔄 Main Lagi
+                    </button>
+                    <button id="finishGameBtn" class="btn btn-danger" onclick="finishGame()" style="display: none;">
+                        🏁 Selesai
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Notification Area -->
+        <div id="notification" class="notification"></div>
+        
+        <!-- Custom Modal Dialog -->
+        <div id="customModal" class="custom-modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <span class="modal-icon">❓</span>
+                    <h3 class="modal-title"></h3>
+                </div>
+                <div class="modal-body">
+                    <p class="modal-message"></p>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn-modal btn-cancel" onclick="closeModal(false)">Batal</button>
+                    <button class="btn-modal btn-confirm" onclick="closeModal(true)">OK</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/game.js') }}"></script>
+</body>
+</html>
