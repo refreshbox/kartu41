@@ -40,6 +40,7 @@ docker run -d -p 5000:5000 kartu41
 docker run -d -p 5000:5000 \
   -e FLASK_SECRET_KEY=your_secret_key \
   -e SOCKET_IO_PATH=/socket.io \
+  -e BASE_HREF=/ \
   kartu41
 ```
 
