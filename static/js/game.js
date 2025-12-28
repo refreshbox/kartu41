@@ -400,7 +400,8 @@ function updateLobby(state) {
 // Copy game ID
 function copyGameId() {
     const gameId = document.getElementById('lobbyGameId').textContent;
-    navigator.clipboard.writeText("Gas kuyyy 👉 kartu41.bepe.web.id " + gameId).then(() => {
+    const url = window.location.origin + window.location.pathname;
+    navigator.clipboard.writeText(`Gas kuyyy 👉 ${url} 👉 Game ID: ${gameId}`).then(() => {
         showNotification('Game ID berhasil disalin!', 'success');
     });
 }
