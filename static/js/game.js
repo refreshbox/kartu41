@@ -16,6 +16,7 @@ let gameState = {
     gameId: null,
     playerId: null,
     playerName: null,
+    latestState: null,
     myHand: [],
     selectedCardIndex: null,
     hasDrawn: false,
@@ -24,12 +25,401 @@ let gameState = {
     unreadChatCount: 0
 };
 
+// Reconnect state
+let reconnectState = {
+    shouldAutoReconnect: false,
+    reconnectInProgress: false
+};
+
+let connectionState = {
+    status: 'connecting',
+    title: 'Menyambung ke server',
+    message: 'Sedang menyiapkan koneksi permainan.'
+};
+
 // Timer state
 let turnTimer = {
     interval: null,
-    secondsLeft: 20,
+    secondsLeft: 30,
     isRunning: false
 };
+
+let dragState = {
+    pointerId: null,
+    kind: null,
+    cardIndex: null,
+    sourceEl: null,
+    previewEl: null,
+    startX: 0,
+    startY: 0,
+    offsetX: 0,
+    offsetY: 0,
+    hasDragged: false,
+    suppressClick: false
+};
+
+function isMyActiveTurn() {
+    return gameState.latestState?.current_player_id === gameState.playerId;
+}
+
+function canDragHandCards() {
+    return Boolean(
+        isMyActiveTurn() &&
+        gameState.hasDrawn &&
+        gameState.tempCard &&
+        !isServerInteractionBlocked()
+    );
+}
+
+function canDragDiscardPileToHand() {
+    return Boolean(
+        isMyActiveTurn() &&
+        !gameState.hasDrawn &&
+        gameState.latestState?.last_discarded_card &&
+        !isServerInteractionBlocked()
+    );
+}
+
+function canCloseWithDraggedCard() {
+    const totalCards = gameState.myHand.length + (gameState.tempCard ? 1 : 0);
+    return canDragHandCards() && totalCards === 5;
+}
+
+function getDiscardDropZone() {
+    return document.getElementById('discardPileArea');
+}
+
+function getDiscardButtonDropZone() {
+    return document.getElementById('discardButton');
+}
+
+function getCloseDropZone() {
+    return document.getElementById('closeHandButton');
+}
+
+function getHandDropZone() {
+    return document.getElementById('yourHand');
+}
+
+function setDragHint(message = '') {
+    const dragHint = document.getElementById('dragHint');
+    if (!dragHint) {
+        return;
+    }
+
+    dragHint.textContent = message;
+}
+
+function updateDiscardDropZoneState(mode = 'idle') {
+    const discardZone = getDiscardDropZone();
+    if (!discardZone) {
+        return;
+    }
+
+    discardZone.classList.remove('drop-ready', 'drop-active');
+
+    if (mode === 'ready') {
+        discardZone.classList.add('drop-ready');
+    } else if (mode === 'active') {
+        discardZone.classList.add('drop-ready', 'drop-active');
+    }
+}
+
+function updateDiscardButtonDropZoneState(mode = 'idle') {
+    const discardButtonZone = getDiscardButtonDropZone();
+    if (!discardButtonZone) {
+        return;
+    }
+
+    discardButtonZone.classList.remove('drop-ready', 'drop-active');
+
+    if (mode === 'ready') {
+        discardButtonZone.classList.add('drop-ready');
+    } else if (mode === 'active') {
+        discardButtonZone.classList.add('drop-ready', 'drop-active');
+    }
+}
+
+function updateCloseDropZoneState(mode = 'idle') {
+    const closeZone = getCloseDropZone();
+    if (!closeZone) {
+        return;
+    }
+
+    closeZone.classList.remove('close-drop-ready', 'close-drop-active');
+
+    if (mode === 'ready') {
+        closeZone.classList.add('close-drop-ready');
+    } else if (mode === 'active') {
+        closeZone.classList.add('close-drop-ready', 'close-drop-active');
+    }
+}
+
+function updateHandDropZoneState(mode = 'idle') {
+    const handZone = getHandDropZone();
+    if (!handZone) {
+        return;
+    }
+
+    handZone.classList.remove('drop-ready', 'drop-active');
+
+    if (mode === 'ready') {
+        handZone.classList.add('drop-ready');
+    } else if (mode === 'active') {
+        handZone.classList.add('drop-ready', 'drop-active');
+    }
+}
+
+function resetCardDragState() {
+    if (dragState.sourceEl) {
+        dragState.sourceEl.classList.remove('dragging-source');
+    }
+
+    if (dragState.previewEl) {
+        dragState.previewEl.remove();
+    }
+
+    dragState.pointerId = null;
+    dragState.kind = null;
+    dragState.cardIndex = null;
+    dragState.sourceEl = null;
+    dragState.previewEl = null;
+    dragState.startX = 0;
+    dragState.startY = 0;
+    dragState.offsetX = 0;
+    dragState.offsetY = 0;
+    dragState.hasDragged = false;
+
+    updateDiscardDropZoneState(canDragHandCards() ? 'ready' : 'idle');
+    updateDiscardButtonDropZoneState(canDragHandCards() ? 'ready' : 'idle');
+    updateCloseDropZoneState(canCloseWithDraggedCard() ? 'ready' : 'idle');
+    updateHandDropZoneState(canDragDiscardPileToHand() ? 'ready' : 'idle');
+}
+
+function pointInsideElement(element, clientX, clientY) {
+    if (!element) {
+        return false;
+    }
+
+    const rect = element.getBoundingClientRect();
+    return (
+        clientX >= rect.left &&
+        clientX <= rect.right &&
+        clientY >= rect.top &&
+        clientY <= rect.bottom
+    );
+}
+
+function createDragPreview(sourceEl) {
+    const preview = sourceEl.cloneNode(true);
+    preview.classList.remove('selected', 'temp-card', 'dragging-source');
+    preview.classList.add('drag-card-preview');
+    document.body.appendChild(preview);
+    return preview;
+}
+
+function positionDragPreview(clientX, clientY) {
+    if (!dragState.previewEl) {
+        return;
+    }
+
+    dragState.previewEl.style.left = `${clientX - dragState.offsetX}px`;
+    dragState.previewEl.style.top = `${clientY - dragState.offsetY}px`;
+}
+
+function beginCardDrag(event) {
+    if (!canDragHandCards()) {
+        return;
+    }
+
+    if (event.pointerType === 'mouse' && event.button !== 0) {
+        return;
+    }
+
+    const cardEl = event.currentTarget;
+    const cardIndex = Number(cardEl.dataset.cardIndex);
+    const bounds = cardEl.getBoundingClientRect();
+
+    dragState.pointerId = event.pointerId;
+    dragState.kind = 'hand-card';
+    dragState.cardIndex = cardIndex;
+    dragState.sourceEl = cardEl;
+    dragState.previewEl = null;
+    dragState.startX = event.clientX;
+    dragState.startY = event.clientY;
+    dragState.offsetX = event.clientX - bounds.left;
+    dragState.offsetY = event.clientY - bounds.top;
+    dragState.hasDragged = false;
+
+    if (typeof cardEl.setPointerCapture === 'function') {
+        cardEl.setPointerCapture(event.pointerId);
+    }
+}
+
+function beginDiscardPileDrag(event) {
+    if (!canDragDiscardPileToHand()) {
+        return;
+    }
+
+    if (event.pointerType === 'mouse' && event.button !== 0) {
+        return;
+    }
+
+    const cardEl = event.currentTarget;
+    const bounds = cardEl.getBoundingClientRect();
+
+    dragState.pointerId = event.pointerId;
+    dragState.kind = 'discard-pile';
+    dragState.cardIndex = null;
+    dragState.sourceEl = cardEl;
+    dragState.previewEl = null;
+    dragState.startX = event.clientX;
+    dragState.startY = event.clientY;
+    dragState.offsetX = event.clientX - bounds.left;
+    dragState.offsetY = event.clientY - bounds.top;
+    dragState.hasDragged = false;
+
+    if (typeof cardEl.setPointerCapture === 'function') {
+        cardEl.setPointerCapture(event.pointerId);
+    }
+}
+
+function getHandCardDropTarget(clientX, clientY) {
+    if (canCloseWithDraggedCard() && pointInsideElement(getCloseDropZone(), clientX, clientY)) {
+        return 'close';
+    }
+
+    if (
+        canDragHandCards() && (
+            pointInsideElement(getDiscardDropZone(), clientX, clientY) ||
+            pointInsideElement(getDiscardButtonDropZone(), clientX, clientY)
+        )
+    ) {
+        return 'discard';
+    }
+
+    return null;
+}
+
+function getDiscardPileDropTarget(clientX, clientY) {
+    if (canDragDiscardPileToHand() && pointInsideElement(getHandDropZone(), clientX, clientY)) {
+        return 'hand';
+    }
+
+    return null;
+}
+
+function moveCardDrag(event) {
+    if (dragState.pointerId !== event.pointerId || !dragState.kind) {
+        return;
+    }
+
+    const distance = Math.hypot(event.clientX - dragState.startX, event.clientY - dragState.startY);
+    if (!dragState.hasDragged && distance < 10) {
+        return;
+    }
+
+    if (!dragState.hasDragged) {
+        dragState.hasDragged = true;
+        dragState.suppressClick = true;
+        dragState.previewEl = createDragPreview(dragState.sourceEl);
+        dragState.sourceEl.classList.add('dragging-source');
+        if (dragState.kind === 'discard-pile') {
+            setDragHint('Lepaskan kartu buangan ke susunan kartu Anda.');
+        } else {
+            setDragHint('Lepaskan kartu ke area buangan atau tombol tutup kartu.');
+        }
+    }
+
+    positionDragPreview(event.clientX, event.clientY);
+    if (dragState.kind === 'discard-pile') {
+        const dropTarget = getDiscardPileDropTarget(event.clientX, event.clientY);
+        updateHandDropZoneState(dropTarget === 'hand' ? 'active' : (canDragDiscardPileToHand() ? 'ready' : 'idle'));
+    } else {
+        const dropTarget = getHandCardDropTarget(event.clientX, event.clientY);
+        updateDiscardDropZoneState(dropTarget === 'discard' ? 'active' : (canDragHandCards() ? 'ready' : 'idle'));
+        updateDiscardButtonDropZoneState(dropTarget === 'discard' ? 'active' : (canDragHandCards() ? 'ready' : 'idle'));
+        updateCloseDropZoneState(dropTarget === 'close' ? 'active' : (canCloseWithDraggedCard() ? 'ready' : 'idle'));
+    }
+}
+
+function finishCardDrag(event) {
+    if (dragState.pointerId !== event.pointerId || !dragState.kind) {
+        return;
+    }
+
+    const dragKind = dragState.kind;
+    const droppedCardIndex = dragState.cardIndex;
+    const hadDragged = dragState.hasDragged;
+    const dropTarget = dragKind === 'discard-pile'
+        ? getDiscardPileDropTarget(event.clientX, event.clientY)
+        : getHandCardDropTarget(event.clientX, event.clientY);
+
+    if (dragState.sourceEl && typeof dragState.sourceEl.releasePointerCapture === 'function') {
+        try {
+            dragState.sourceEl.releasePointerCapture(event.pointerId);
+        } catch (error) {
+            // Ignore release errors from browsers that already dropped capture.
+        }
+    }
+
+    resetCardDragState();
+
+    if (dragKind === 'discard-pile' && hadDragged && dropTarget === 'hand') {
+        drawCard(true);
+    } else if (dragKind === 'hand-card' && hadDragged && dropTarget === 'discard') {
+        discardCard(droppedCardIndex);
+    } else if (dragKind === 'hand-card' && hadDragged && dropTarget === 'close') {
+        closeHandWithCard(droppedCardIndex);
+    } else if (canDragDiscardPileToHand()) {
+        setDragHint('Tarik kartu buangan ke susunan kartu Anda.');
+    } else if (canDragHandCards()) {
+        setDragHint('Tarik kartu ke area buangan atau tombol tutup kartu.');
+    } else {
+        setDragHint('');
+    }
+}
+
+function cancelCardDrag(event) {
+    if (dragState.pointerId !== event.pointerId) {
+        return;
+    }
+
+    resetCardDragState();
+    if (canDragDiscardPileToHand()) {
+        setDragHint('Tarik kartu buangan ke susunan kartu Anda.');
+    } else if (canDragHandCards()) {
+        setDragHint('Tarik kartu ke area buangan atau tombol tutup kartu.');
+    } else {
+        setDragHint('');
+    }
+}
+
+function handleCardClick(event, index) {
+    if (dragState.suppressClick) {
+        dragState.suppressClick = false;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+    }
+
+    selectCard(index);
+}
+
+function handleDiscardPileClick(event) {
+    if (dragState.suppressClick) {
+        dragState.suppressClick = false;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+    }
+
+    drawCard(true);
+}
+
+window.addEventListener('pointermove', moveCardDrag);
+window.addEventListener('pointerup', finishCardDrag);
+window.addEventListener('pointercancel', cancelCardDrag);
 
 // Play notification sound
 function playNotificationSound() {
@@ -69,7 +459,7 @@ function playCardDiscardSound() {
 function startTurnTimer() {
     stopTurnTimer(); // Stop any existing timer
     
-    turnTimer.secondsLeft = 20;
+    turnTimer.secondsLeft = 30;
     turnTimer.isRunning = true;
     
     const timerContainer = document.getElementById('timerContainer');
@@ -174,10 +564,13 @@ function autoDiscardAfterDraw() {
 
 // Custom Modal Dialog
 let modalResolve = null;
+let modalContext = null;
+let readyCheckPromptOpen = false;
 
-function showCustomModal(title, message, icon = '❓', customHTML = null) {
+function showCustomModal(title, message, icon = '❓', customHTML = null, context = 'default') {
     return new Promise((resolve) => {
         modalResolve = resolve;
+        modalContext = context;
         
         const modal = document.getElementById('customModal');
         const modalTitle = modal.querySelector('.modal-title');
@@ -207,6 +600,16 @@ function closeModal(result) {
         modalResolve(result);
         modalResolve = null;
     }
+    modalContext = null;
+}
+
+function dismissModalSilently(context) {
+    const modal = document.getElementById('customModal');
+    if (!modal.classList.contains('show') || modalContext !== context) {
+        return;
+    }
+
+    closeModal(null);
 }
 
 // Close modal on ESC key
@@ -222,12 +625,213 @@ document.addEventListener('keydown', (e) => {
 // Initialize socket connection
 socket.on('connect', () => {
     console.log('Connected to server');
+    if (reconnectState.shouldAutoReconnect || reconnectState.reconnectInProgress) {
+        setConnectionState(
+            'reconnecting',
+            'Koneksi kembali tersedia',
+            'Socket tersambung lagi. Sedang menyelaraskan ulang sesi permainan Anda.'
+        );
+    } else {
+        setConnectionState('online', 'Tersambung', 'Koneksi permainan stabil.');
+    }
 });
 
 socket.on('connected', (data) => {
     gameState.playerId = data.sid;
     console.log('Player ID:', gameState.playerId);
+    attemptAutoReconnect();
 });
+
+function getSavedSession() {
+    const savedGameId = localStorage.getItem('kartu41_game_id');
+    const savedPlayerName = localStorage.getItem('kartu41_player_name');
+
+    if (!savedGameId || !savedPlayerName) {
+        return null;
+    }
+
+    return {
+        gameId: savedGameId,
+        playerName: savedPlayerName
+    };
+}
+
+function updateSavedSessionPanel() {
+    const panel = document.getElementById('savedSessionPanel');
+    const gameIdEl = document.getElementById('savedSessionGameId');
+    const playerNameEl = document.getElementById('savedSessionPlayerName');
+    const savedSession = getSavedSession();
+
+    if (!panel || !gameIdEl || !playerNameEl) {
+        return;
+    }
+
+    if (!savedSession) {
+        panel.style.display = 'none';
+        return;
+    }
+
+    gameIdEl.textContent = savedSession.gameId;
+    playerNameEl.textContent = savedSession.playerName;
+    panel.style.display = 'block';
+}
+
+function reconnectSavedGame() {
+    const savedSession = getSavedSession();
+    if (!savedSession) {
+        showNotification('Tidak ada sesi game aktif yang tersimpan.', 'error');
+        updateSavedSessionPanel();
+        return;
+    }
+
+    gameState.gameId = savedSession.gameId;
+    gameState.playerName = savedSession.playerName;
+
+    const welcomeNameInput = document.getElementById('playerName');
+    const joinNameInput = document.getElementById('joinPlayerName');
+    const joinGameIdInput = document.getElementById('joinGameId');
+
+    if (welcomeNameInput) {
+        welcomeNameInput.value = savedSession.playerName;
+    }
+    if (joinNameInput) {
+        joinNameInput.value = savedSession.playerName;
+    }
+    if (joinGameIdInput) {
+        joinGameIdInput.value = savedSession.gameId;
+    }
+
+    reconnectState.shouldAutoReconnect = true;
+
+    if (socket.connected) {
+        attemptAutoReconnect();
+    } else {
+        setConnectionState(
+            'reconnecting',
+            'Menyambung ulang ke game',
+            'Koneksi sedang disiapkan. Anda akan otomatis masuk lagi saat server merespons.'
+        );
+    }
+}
+
+function attemptAutoReconnect() {
+    if (!reconnectState.shouldAutoReconnect || reconnectState.reconnectInProgress) {
+        return;
+    }
+
+    const savedSession = getSavedSession();
+    if (!savedSession) {
+        reconnectState.shouldAutoReconnect = false;
+        return;
+    }
+
+    reconnectState.reconnectInProgress = true;
+    setConnectionState(
+        'reconnecting',
+        'Menyambung ulang ke game',
+        'Koneksi kembali tersedia. Sedang mencoba masuk lagi ke game Anda.'
+    );
+    gameState.gameId = savedSession.gameId;
+    gameState.playerName = savedSession.playerName;
+
+    socket.emit('join_game', {
+        game_id: savedSession.gameId,
+        name: savedSession.playerName
+    });
+}
+
+function hasActiveGameSession() {
+    return Boolean(gameState.gameId || getSavedSession());
+}
+
+function setConnectionState(status, title, message) {
+    connectionState.status = status;
+    connectionState.title = title;
+    connectionState.message = message;
+    updateConnectionUI();
+}
+
+function isServerInteractionBlocked() {
+    return connectionState.status !== 'online';
+}
+
+function requireOnlineConnection(actionLabel = 'melakukan aksi ini') {
+    if (!isServerInteractionBlocked()) {
+        return true;
+    }
+
+    if (connectionState.status === 'reconnecting') {
+        showNotification(`Koneksi sedang dipulihkan. Tunggu sebentar sebelum ${actionLabel}.`, 'warning');
+    } else {
+        showNotification(`Koneksi ke server belum siap untuk ${actionLabel}.`, 'error');
+    }
+    return false;
+}
+
+function updateConnectionUI() {
+    const badge = document.getElementById('connectionStatusBadge');
+    const badgeText = document.getElementById('connectionStatusText');
+    const banner = document.getElementById('connectionBanner');
+    const bannerTitle = document.getElementById('connectionBannerTitle');
+    const bannerMessage = document.getElementById('connectionBannerMessage');
+    const isBlocked = isServerInteractionBlocked();
+
+    if (badge && badgeText) {
+        badge.className = `connection-status-badge connection-status-${connectionState.status}`;
+        badgeText.textContent = connectionState.title;
+        badge.title = connectionState.title;
+        badge.setAttribute('aria-label', connectionState.title);
+    }
+
+    if (banner && bannerTitle && bannerMessage) {
+        const shouldShowBanner = connectionState.status === 'reconnecting' || connectionState.status === 'offline';
+        banner.className = 'connection-banner';
+        if (shouldShowBanner) {
+            banner.classList.add('show', connectionState.status);
+            bannerTitle.textContent = connectionState.title;
+            bannerMessage.textContent = connectionState.message;
+        }
+    }
+
+    const deckCard = document.querySelector('.deck-card');
+    const discardPileCard = document.getElementById('discardPileCard');
+    const discardButton = document.getElementById('discardButton');
+    const closeHandButton = document.getElementById('closeHandButton');
+    const startButton = document.getElementById('startButton');
+    const timerToggle = document.getElementById('timerToggle');
+    const finishButton = document.getElementById('finishGameBtn');
+    const chatInput = document.getElementById('chatInput');
+    const sendButton = document.querySelector('.btn-send');
+
+    if (deckCard) {
+        deckCard.classList.toggle('interaction-disabled', isBlocked);
+    }
+    if (discardPileCard) {
+        discardPileCard.classList.toggle('interaction-disabled', isBlocked);
+    }
+    if (discardButton) {
+        discardButton.classList.toggle('interaction-disabled', isBlocked);
+    }
+    if (closeHandButton) {
+        closeHandButton.classList.toggle('interaction-disabled', isBlocked);
+    }
+    if (startButton) {
+        startButton.classList.toggle('interaction-disabled', isBlocked);
+    }
+    if (timerToggle) {
+        timerToggle.disabled = isBlocked;
+    }
+    if (finishButton) {
+        finishButton.classList.toggle('interaction-disabled', isBlocked);
+    }
+    if (chatInput) {
+        chatInput.disabled = isBlocked;
+        chatInput.placeholder = isBlocked ? 'Menunggu koneksi kembali...' : 'Ketik pesan...';
+    }
+    if (sendButton) {
+        sendButton.classList.toggle('interaction-disabled', isBlocked);
+    }
+}
 
 // Screen management
 function showScreen(screenId) {
@@ -235,10 +839,19 @@ function showScreen(screenId) {
         screen.classList.remove('active');
     });
     document.getElementById(screenId).classList.add('active');
+    if (screenId === 'gameOverScreen') {
+        syncGameOverActions(gameState.latestState);
+    }
+    updateConnectionUI();
+}
+
+function isScreenActive(screenId) {
+    return document.getElementById(screenId)?.classList.contains('active') || false;
 }
 
 function showWelcome() {
     showScreen('welcomeScreen');
+    updateSavedSessionPanel();
 }
 
 function showJoinGame() {
@@ -278,6 +891,10 @@ function showNotification(message, type = 'info') {
 
 // Create game
 function createGame() {
+    if (!requireOnlineConnection('membuat game')) {
+        return;
+    }
+
     const playerName = document.getElementById('playerName').value.trim();
     
     if (!playerName) {
@@ -286,14 +903,21 @@ function createGame() {
     }
     
     gameState.playerName = playerName;
-    socket.emit('create_game', { name: playerName });
+    socket.emit('create_game', {
+        name: playerName,
+        bot_turn_delay_seconds: 30
+    });
 }
 
 socket.on('game_created', (data) => {
     gameState.gameId = data.game_id;
+    reconnectState.shouldAutoReconnect = false;
+    reconnectState.reconnectInProgress = false;
+    setConnectionState('online', 'Tersambung', 'Game aktif dan siap dimainkan.');
     // Simpan untuk reconnect
     localStorage.setItem('kartu41_game_id', data.game_id);
     localStorage.setItem('kartu41_player_name', gameState.playerName);
+    updateSavedSessionPanel();
     
     document.getElementById('lobbyGameId').textContent = data.game_id;
     updateLobby(data.game_state);
@@ -303,6 +927,10 @@ socket.on('game_created', (data) => {
 
 // Join game
 function joinGame() {
+    if (!requireOnlineConnection('gabung game')) {
+        return;
+    }
+
     const playerName = document.getElementById('joinPlayerName').value.trim();
     const gameId = document.getElementById('joinGameId').value.trim().toUpperCase();
     
@@ -322,9 +950,13 @@ function joinGame() {
 }
 
 socket.on('player_joined', (data) => {
+    reconnectState.shouldAutoReconnect = false;
+    reconnectState.reconnectInProgress = false;
+    setConnectionState('online', 'Tersambung', 'Anda sudah masuk ke sesi permainan.');
     // Simpan untuk reconnect
     localStorage.setItem('kartu41_game_id', gameState.gameId);
     localStorage.setItem('kartu41_player_name', gameState.playerName);
+    updateSavedSessionPanel();
     
     updateLobby(data.game_state);
     showScreen('lobbyScreen');
@@ -335,39 +967,138 @@ socket.on('player_joined', (data) => {
     playDoorbellSound();
 });
 
+function isCurrentPlayerReady(state) {
+    return Boolean(state?.ready_player_names?.includes(gameState.playerName));
+}
+
+function updateReadyCheckPanel(state) {
+    const panel = document.getElementById('readyCheckPanel');
+    const messageEl = document.getElementById('readyCheckMessage');
+    const summaryEl = document.getElementById('readyCheckSummary');
+    const actionsEl = document.getElementById('readyCheckActions');
+
+    if (!panel || !messageEl || !summaryEl || !actionsEl) {
+        return;
+    }
+
+    if (!state.ready_check_active) {
+        panel.style.display = 'none';
+        actionsEl.style.display = 'none';
+        summaryEl.innerHTML = '';
+        dismissModalSilently('ready-check');
+        readyCheckPromptOpen = false;
+        return;
+    }
+
+    panel.style.display = 'block';
+    messageEl.textContent = 'Semua pemain online harus siap sebelum ronde dimulai.';
+    summaryEl.innerHTML = '';
+
+    state.players
+        .filter((player) => player.is_online)
+        .forEach((player) => {
+            const row = document.createElement('div');
+            row.className = 'ready-check-row';
+            const isReady = state.ready_player_names.includes(player.name);
+            row.innerHTML = `
+                <strong>${player.name}</strong>
+                <span class="player-chip ${isReady ? 'ready' : 'waiting'}">
+                    ${isReady ? '✅ Siap' : '⏳ Menunggu'}
+                </span>
+            `;
+            summaryEl.appendChild(row);
+        });
+
+    const shouldShowActions = !isServerInteractionBlocked() && !isCurrentPlayerReady(state);
+    actionsEl.style.display = shouldShowActions ? 'flex' : 'none';
+}
+
+function promptReadyCheckIfNeeded(state) {
+    if (!state.ready_check_active || isCurrentPlayerReady(state) || readyCheckPromptOpen) {
+        return;
+    }
+
+    readyCheckPromptOpen = true;
+    showCustomModal(
+        'Konfirmasi Mulai Game',
+        'Ada pemain yang mengajak semua pemain masuk ronde berikutnya. Anda siap bermain sekarang?',
+        '🎮',
+        null,
+        'ready-check'
+    ).then((accepted) => {
+        readyCheckPromptOpen = false;
+
+        if (accepted === null) {
+            return;
+        }
+
+        socket.emit('respond_ready_check', {
+            accepted: Boolean(accepted)
+        });
+    });
+}
+
 // Update lobby
 function updateLobby(state) {
+    gameState.latestState = state;
+    if (state.game_id) {
+        gameState.gameId = state.game_id;
+    }
+
     const playersList = document.getElementById('playersList');
     const playerCount = document.getElementById('playerCount');
+    const isBlocked = isServerInteractionBlocked();
     
     playersList.innerHTML = '';
     playerCount.textContent = state.players.length;
     
-    state.players.forEach((player, index) => {
+    state.players.forEach((player) => {
         const playerItem = document.createElement('div');
         playerItem.className = 'player-item';
-        
-        // Tentukan status online/offline dengan warna
+
         const statusColor = player.is_online ? '#28a745' : '#dc3545';
         const statusText = player.is_online ? 'Online' : 'Offline';
-        
+        const isCreatorPlayer = player.name === state.creator_name;
+        const isReady = state.ready_player_names?.includes(player.name);
+        const canKick = (
+            !state.game_started &&
+            gameState.playerName === state.creator_name &&
+            player.name !== gameState.playerName
+        );
+
         playerItem.innerHTML = `
-            <span class="player-icon">👤</span>
-            <span>${player.name}</span>
-            <span class="player-status" style="color: ${statusColor}; font-size: 0.85em; margin-left: 10px;">● ${statusText}</span>
+            <div class="player-item-main">
+                <span class="player-icon">👤</span>
+                <span>${player.name}</span>
+                <span class="player-status" style="color: ${statusColor}; font-size: 0.85em;">● ${statusText}</span>
+            </div>
+            <div class="player-item-meta">
+                ${isCreatorPlayer ? '<span class="player-chip owner">👑 Pembuat</span>' : ''}
+                ${state.ready_check_active ? `<span class="player-chip ${isReady ? 'ready' : 'waiting'}">${isReady ? '✅ Siap' : '⏳ Menunggu'}</span>` : ''}
+                ${canKick ? `<button class="btn-kick" data-player-name="${player.name}">Keluarkan</button>` : ''}
+            </div>
         `;
         playersList.appendChild(playerItem);
+
+        if (canKick) {
+            const kickButton = playerItem.querySelector('.btn-kick');
+            kickButton.addEventListener('click', () => kickPlayer(player.name));
+        }
     });
     
-    // Enable start button hanya jika: minimal 2 players dan user adalah creator
     const startButton = document.getElementById('startButton');
     const isCreator = state.creator_name === gameState.playerName;
-    const hasEnoughPlayers = state.players.length >= 2;
+    const hasEnoughPlayers = state.players.filter((player) => player.is_online).length >= 2;
     
-    // Tampilkan game settings hanya untuk creator
     const gameSettings = document.getElementById('gameSettings');
+    const gameSettingsAccessNote = document.getElementById('gameSettingsAccessNote');
     if (gameSettings) {
-        gameSettings.style.display = isCreator ? 'block' : 'none';
+        gameSettings.style.display = 'block';
+    }
+    if (gameSettingsAccessNote) {
+        gameSettingsAccessNote.textContent = isCreator
+            ? 'Pengaturan ini bisa Anda ubah sebelum game dimulai.'
+            : 'Informasi pengaturan game. Hanya pembuat game yang bisa mengubahnya.';
     }
     
     // Update timer toggle berdasarkan state
@@ -375,43 +1106,155 @@ function updateLobby(state) {
     if (timerToggle && state.use_timer !== undefined) {
         timerToggle.checked = state.use_timer;
     }
-    
-    // Debug logging
-    console.log('UpdateLobby Debug:', {
-        creator_name: state.creator_name,
-        playerName: gameState.playerName,
-        isCreator: isCreator,
-        hasEnoughPlayers: hasEnoughPlayers,
-        use_timer: state.use_timer
-    });
-    
-    startButton.disabled = !isCreator || !hasEnoughPlayers;
-    
-    // Update button text untuk feedback
-    if (!isCreator) {
-        startButton.title = 'Hanya pembuat game yang bisa memulai';
+    const randomizePlayerOrderToggle = document.getElementById('randomizePlayerOrderToggle');
+    if (randomizePlayerOrderToggle && state.randomize_player_order !== undefined) {
+        randomizePlayerOrderToggle.checked = state.randomize_player_order;
+    }
+    const botTurnDelayInput = document.getElementById('botTurnDelayInput');
+    if (botTurnDelayInput && state.bot_turn_delay_seconds !== undefined) {
+        botTurnDelayInput.value = state.bot_turn_delay_seconds;
+    }
+
+    const readyCheckActive = Boolean(state.ready_check_active);
+    startButton.disabled = isBlocked || !hasEnoughPlayers;
+
+    if (readyCheckActive) {
+        if (isCreator) {
+            startButton.disabled = isBlocked;
+            startButton.textContent = '🛑 Batalkan Konfirmasi';
+        } else {
+            startButton.disabled = true;
+            startButton.textContent = '⏳ Menunggu Konfirmasi';
+        }
+    } else {
+        startButton.textContent = '🚀 Mulai Game';
+    }
+
+    if (isBlocked) {
+        startButton.title = 'Menunggu koneksi kembali';
+    } else if (readyCheckActive && !isCreator) {
+        startButton.title = 'Konfirmasi mulai sedang berlangsung';
+    } else if (readyCheckActive) {
+        startButton.title = 'Batalkan konfirmasi mulai';
     } else if (!hasEnoughPlayers) {
         startButton.title = 'Minimal 2 pemain untuk memulai';
     } else {
-        startButton.title = 'Mulai game sekarang';
+        startButton.title = 'Mulai konfirmasi semua pemain';
     }
+
+    if (timerToggle) {
+        timerToggle.disabled = isBlocked || !isCreator || readyCheckActive;
+        timerToggle.title = isCreator
+            ? 'Aktifkan atau nonaktifkan mode timer'
+            : 'Hanya pembuat game yang bisa mengubah mode timer';
+    }
+    if (randomizePlayerOrderToggle) {
+        randomizePlayerOrderToggle.disabled = isBlocked || !isCreator || readyCheckActive;
+        randomizePlayerOrderToggle.title = isCreator
+            ? 'Aktifkan atau nonaktifkan pengacakan urutan pemain'
+            : 'Hanya pembuat game yang bisa mengubah urutan pemain';
+    }
+    if (botTurnDelayInput) {
+        botTurnDelayInput.disabled = isBlocked || !isCreator || readyCheckActive;
+        botTurnDelayInput.title = isCreator
+            ? 'Atur detik takeover bot saat pemain terputus'
+            : 'Hanya pembuat game yang bisa mengubah takeover bot';
+    }
+
+    updateReadyCheckPanel(state);
+    promptReadyCheckIfNeeded(state);
+    updateConnectionUI();
 }
 
 // Copy game ID
 function copyGameId() {
-    const gameId = document.getElementById('lobbyGameId').textContent;
-    const url = window.location.origin + window.location.pathname;
-    navigator.clipboard.writeText(`Gas kuyyy 👉 ${url} 👉 Game ID: ${gameId}`).then(() => {
+    const gameId = document.getElementById('lobbyGameId').textContent.trim();
+    if (!gameId) {
+        showNotification('Game ID belum tersedia.', 'error');
+        return;
+    }
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(gameId)
+            .then(() => {
+                showNotification('Game ID berhasil disalin!', 'success');
+            })
+            .catch(() => {
+                fallbackCopyGameId(gameId);
+            });
+        return;
+    }
+
+    fallbackCopyGameId(gameId);
+}
+
+function fallbackCopyGameId(gameId) {
+    const tempInput = document.createElement('input');
+    tempInput.value = gameId;
+    document.body.appendChild(tempInput);
+    tempInput.select();
+    tempInput.setSelectionRange(0, tempInput.value.length);
+
+    try {
+        document.execCommand('copy');
         showNotification('Game ID berhasil disalin!', 'success');
-    });
+    } catch (error) {
+        showNotification(`Salin manual Game ID: ${gameId}`, 'info');
+    } finally {
+        document.body.removeChild(tempInput);
+    }
 }
 
 // Toggle timer mode (hanya creator)
 function toggleTimerMode() {
+    if (!requireOnlineConnection('mengubah pengaturan timer')) {
+        return;
+    }
+
     const timerToggle = document.getElementById('timerToggle');
     const useTimer = timerToggle.checked;
     
     socket.emit('toggle_timer', { use_timer: useTimer });
+}
+
+function toggleRandomizePlayerOrder() {
+    if (!requireOnlineConnection('mengubah urutan pemain')) {
+        return;
+    }
+
+    const randomizeToggle = document.getElementById('randomizePlayerOrderToggle');
+    const randomizePlayerOrder = Boolean(randomizeToggle?.checked);
+
+    socket.emit('toggle_randomize_player_order', {
+        randomize_player_order: randomizePlayerOrder
+    });
+}
+
+function updateBotTurnDelaySetting() {
+    if (!requireOnlineConnection('mengubah delay takeover bot')) {
+        return;
+    }
+
+    const botTurnDelayInput = document.getElementById('botTurnDelayInput');
+    if (!botTurnDelayInput) {
+        return;
+    }
+
+    const rawValue = botTurnDelayInput.value.trim();
+    if (rawValue === '') {
+        showNotification('Masukkan jumlah detik takeover bot!', 'error');
+        return;
+    }
+
+    const delaySeconds = Number(rawValue);
+    if (!Number.isFinite(delaySeconds) || delaySeconds < 0) {
+        showNotification('Delay takeover bot harus 0 detik atau lebih.', 'error');
+        return;
+    }
+
+    socket.emit('update_bot_turn_delay', {
+        bot_turn_delay_seconds: Math.floor(delaySeconds)
+    });
 }
 
 // Handle timer toggled response
@@ -425,11 +1268,53 @@ socket.on('timer_toggled', (data) => {
     showNotification(message, 'info');
 });
 
+socket.on('player_order_randomization_toggled', (data) => {
+    const randomizeToggle = document.getElementById('randomizePlayerOrderToggle');
+    if (randomizeToggle) {
+        randomizeToggle.checked = data.randomize_player_order;
+    }
+
+    const message = data.randomize_player_order
+        ? 'Urutan pemain akan diacak saat ronde dimulai'
+        : 'Urutan pemain akan mengikuti susunan lobby saat ini';
+    showNotification(message, 'info');
+});
+
+socket.on('bot_turn_delay_updated', (data) => {
+    const botTurnDelayInput = document.getElementById('botTurnDelayInput');
+    if (botTurnDelayInput) {
+        botTurnDelayInput.value = data.bot_turn_delay_seconds;
+    }
+
+    if (data.game_state) {
+        updateLobby(data.game_state);
+    }
+
+    showNotification(`Bot akan mengambil alih setelah ${data.bot_turn_delay_seconds} detik.`, 'info');
+});
+
 // Start game
 async function startGame() {
+    if (!requireOnlineConnection('memulai game')) {
+        return;
+    }
+
+    if (gameState.latestState?.ready_check_active) {
+        const cancelConfirmed = await showCustomModal(
+            'Batalkan Konfirmasi Mulai?',
+            'Semua pemain sedang diminta konfirmasi. Batalkan proses ini?',
+            '🛑'
+        );
+
+        if (cancelConfirmed) {
+            socket.emit('cancel_ready_check');
+        }
+        return;
+    }
+
     const confirmed = await showCustomModal(
-        'Mulai Game Sekarang?',
-        'Apakah akan memulai sekarang atau menunggu pemain lain gabung?\n\nKlik OK untuk mulai sekarang',
+        'Mulai Konfirmasi Game?',
+        'Semua pemain online akan diminta mengonfirmasi kesiapan sebelum ronde dimulai.',
         '🎮'
     );
     
@@ -438,11 +1323,41 @@ async function startGame() {
     }
 }
 
+function respondReadyCheck(accepted) {
+    if (!requireOnlineConnection('mengirim konfirmasi mulai')) {
+        return;
+    }
+
+    dismissModalSilently('ready-check');
+    readyCheckPromptOpen = false;
+    socket.emit('respond_ready_check', { accepted });
+}
+
+async function kickPlayer(playerName) {
+    if (!requireOnlineConnection('mengeluarkan pemain')) {
+        return;
+    }
+
+    const confirmed = await showCustomModal(
+        'Keluarkan Pemain?',
+        `Keluarkan ${playerName} dari lobby game ini?`,
+        '🚫'
+    );
+
+    if (confirmed) {
+        socket.emit('kick_player', { player_name: playerName });
+    }
+}
+
 socket.on('reconnected', (data) => {
+    reconnectState.shouldAutoReconnect = false;
+    reconnectState.reconnectInProgress = false;
+    setConnectionState('online', 'Tersambung lagi', 'Anda berhasil kembali ke permainan.');
     showNotification('Berhasil reconnect ke game!', 'success');
     
     // Simpan player_id dari reconnect
     gameState.playerId = data.player_id;
+    updateSavedSessionPanel();
     
     console.log('Reconnected Event:', {
         player_id: data.player_id,
@@ -466,42 +1381,131 @@ socket.on('reconnected', (data) => {
 });
 
 socket.on('player_reconnected', (data) => {
-    showNotification(`${data.player_name} kembali ke game!`, 'info');
-    
-    // Update lobby jika di lobby screen
-    if (document.getElementById('lobbyScreen').style.display !== 'none') {
-        updateLobby(data.game_state);
+    showNotification(data.message || `${data.player_name} kembali ke game!`, 'info');
+
+    if (!data.game_state) {
+        return;
     }
-    
-    // Update daftar pemain jika sedang bermain
-    if (document.getElementById('gameScreen').style.display !== 'none' && data.game_state) {
-        updateOtherPlayers(data.game_state);
+
+    if (data.game_state.game_ended) {
+        showScreen('gameOverScreen');
+        displayGameOver(data.game_state);
+    } else {
+        if (isScreenActive('lobbyScreen')) {
+            updateLobby(data.game_state);
+        }
+
+        if (isScreenActive('gameScreen')) {
+            updateOtherPlayers(data.game_state);
+        }
     }
-    
-    if (data.game_state) {
-        Object.assign(gameState, data.game_state);
-    }
+
+    gameState.latestState = data.game_state;
 });
 
 socket.on('player_disconnected', (data) => {
-    showNotification(`${data.player_name} terputus koneksi`, 'error');
-    
-    // Update lobby jika di lobby screen
-    if (document.getElementById('lobbyScreen').style.display !== 'none') {
+    showNotification(data.message || `${data.player_name} terputus koneksi`, 'error');
+
+    if (!data.game_state) {
+        return;
+    }
+
+    if (data.game_state.game_ended) {
+        showScreen('gameOverScreen');
+        displayGameOver(data.game_state);
+    } else {
+        if (isScreenActive('lobbyScreen')) {
+            updateLobby(data.game_state);
+        }
+
+        if (isScreenActive('gameScreen')) {
+            updateOtherPlayers(data.game_state);
+        }
+    }
+
+    gameState.latestState = data.game_state;
+});
+
+socket.on('ready_check_started', (data) => {
+    showScreen('lobbyScreen');
+    document.getElementById('lobbyGameId').textContent = gameState.gameId;
+    updateLobby(data.game_state);
+    showNotification(data.message, 'info');
+});
+
+socket.on('ready_check_updated', (data) => {
+    if (data.game_state) {
         updateLobby(data.game_state);
     }
-    
-    // Update daftar pemain jika sedang bermain
-    if (document.getElementById('gameScreen').style.display !== 'none' && data.game_state) {
-        updateOtherPlayers(data.game_state);
-    }
-    
+    showNotification(data.message, 'info');
+});
+
+socket.on('ready_check_cancelled', (data) => {
+    dismissModalSilently('ready-check');
+    readyCheckPromptOpen = false;
     if (data.game_state) {
-        Object.assign(gameState, data.game_state);
+        updateLobby(data.game_state);
+    }
+    showNotification(data.message, 'warning');
+});
+
+socket.on('returned_to_lobby', (data) => {
+    dismissModalSilently('ready-check');
+    readyCheckPromptOpen = false;
+    showScreen('lobbyScreen');
+    document.getElementById('lobbyGameId').textContent = gameState.gameId;
+    updateLobby(data.game_state);
+    showNotification(data.message, 'success');
+});
+
+socket.on('lobby_updated', (data) => {
+    if (data.game_state) {
+        updateLobby(data.game_state);
+    }
+    if (data.message) {
+        showNotification(data.message, 'info');
     }
 });
 
+socket.on('left_lobby', (data) => {
+    localStorage.removeItem('kartu41_game_id');
+    localStorage.removeItem('kartu41_player_name');
+    gameState.gameId = null;
+    gameState.playerId = null;
+    gameState.latestState = null;
+    reconnectState.shouldAutoReconnect = false;
+    reconnectState.reconnectInProgress = false;
+    updateSavedSessionPanel();
+    showNotification(data.message, 'info');
+    showScreen('welcomeScreen');
+});
+
+socket.on('kicked_from_lobby', (data) => {
+    localStorage.removeItem('kartu41_game_id');
+    localStorage.removeItem('kartu41_player_name');
+    gameState.gameId = null;
+    gameState.playerId = null;
+    gameState.latestState = null;
+    reconnectState.shouldAutoReconnect = false;
+    reconnectState.reconnectInProgress = false;
+    dismissModalSilently('ready-check');
+    readyCheckPromptOpen = false;
+    updateSavedSessionPanel();
+    showNotification(data.message, 'warning');
+    showScreen('welcomeScreen');
+});
+
+socket.on('bot_playing', (data) => {
+    showNotification(data.message, 'info');
+});
+
+socket.on('bot_played_turn', (data) => {
+    showNotification(data.message, 'info');
+});
+
 socket.on('game_started', (data) => {
+    dismissModalSilently('ready-check');
+    readyCheckPromptOpen = false;
     showScreen('gameScreen');
     document.getElementById('gameIdDisplay').textContent = gameState.gameId;
     showNotification(data.message, 'success');
@@ -510,6 +1514,8 @@ socket.on('game_started', (data) => {
 
 // Update game state
 function updateGameState(state) {
+    gameState.latestState = state;
+
     // Update round number
     if (state.round_number) {
         document.getElementById('roundNumber').textContent = state.round_number;
@@ -570,42 +1576,53 @@ function updateGameState(state) {
 function updateDiscardPile(state) {
     const discardPileArea = document.getElementById('discardPileArea');
     const discardPileCard = document.getElementById('discardPileCard');
+
+    if (!discardPileArea || !discardPileCard) {
+        return;
+    }
+
+    const discardCount = (state.players || []).reduce((total, player) => {
+        return total + (player.discard_pile?.length || 0);
+    }, 0);
     
     if (state.last_discarded_card) {
-        // Tampilkan kartu buangan jika ada (semua pemain bisa lihat)
-        discardPileArea.style.display = 'block';
-        
         const card = state.last_discarded_card;
         const isRed = card.suit === '♥' || card.suit === '♦';
         const isMyTurn = state.current_player_id === gameState.playerId && !gameState.hasDrawn;
         
         // Jika giliran pemain dan belum ambil kartu, bisa diklik
-        const clickable = isMyTurn ? 'cursor: pointer;' : 'cursor: default; opacity: 0.7;';
-        const clickHandler = isMyTurn ? 'onclick="drawCard(true)"' : '';
-        
+        const clickable = isMyTurn ? 'cursor: pointer;' : 'cursor: default;';
+        const showDiscardStack = discardCount > 1;
+
+        discardPileArea.classList.toggle('has-card', showDiscardStack);
         discardPileCard.innerHTML = `
-            <div class="card ${isRed ? 'red' : 'black'}" style="${clickable} margin: 0;" ${clickHandler}>
-                <div class="card-rank">${card.rank}</div>
-                <div class="card-suit">${card.suit}</div>
+            ${showDiscardStack ? '<div class="discard-stack-layer discard-stack-layer-back"></div>' : ''}
+            ${showDiscardStack ? '<div class="discard-stack-layer discard-stack-layer-mid"></div>' : ''}
+            ${showDiscardStack ? '<div class="discard-stack-shadow"></div>' : ''}
+            <div class="discard-stack-top">
+                <div class="card ${isRed ? 'red' : 'black'} discard-draw-card" style="${clickable} margin: 0;">
+                    <div class="card-rank">${card.rank}</div>
+                    <div class="card-suit">${card.suit}</div>
+                </div>
             </div>
-            <div style="text-align: center; margin-top: 5px; font-size: 0.8em; color: #ffffffff;">
+            <div class="discard-origin">
                 dari ${state.last_discarder_name}
             </div>
         `;
-        
-        // Update label berdasarkan giliran
-        const label = document.querySelector('.discard-pile-label');
-        if (label) {
-            if (isMyTurn) {
-                label.textContent = 'Ambil dari Buangan';
-                label.style.background = '#28a745';
-            } else {
-                label.textContent = 'Kartu Buangan';
-                label.style.background = '#6c757d';
-            }
+
+        const discardDrawCard = discardPileCard.querySelector('.discard-draw-card');
+        if (discardDrawCard && isMyTurn) {
+            discardDrawCard.addEventListener('click', handleDiscardPileClick);
+            discardDrawCard.addEventListener('pointerdown', beginDiscardPileDrag);
         }
     } else {
-        discardPileArea.style.display = 'none';
+        discardPileArea.classList.remove('has-card');
+        discardPileCard.innerHTML = `
+            <div class="discard-placeholder">
+                <div class="discard-placeholder-icon">🗑️</div>
+                <div class="discard-placeholder-text">Drop kartu di sini</div>
+            </div>
+        `;
     }
 }
 
@@ -624,9 +1641,9 @@ function updateOtherPlayers(state) {
             playerDiv.style.paddingLeft = '8px';
         }
         
-        // Status online/offline dengan warna
-        const statusColor = player.is_online ? '#28a745' : '#dc3545';
-        const statusText = player.is_online ? 'Online' : 'Offline';
+        // Status online/offline/bot dengan warna
+        const statusColor = player.is_bot_controlled ? '#f39c12' : (player.is_online ? '#28a745' : '#dc3545');
+        const statusText = player.is_bot_controlled ? 'Bot' : (player.is_online ? 'Online' : 'Offline');
         
         // Jangan tampilkan score selama pertandingan untuk lebih challenging
         // Score hanya muncul di layar game over
@@ -727,10 +1744,12 @@ socket.on('your_hand', (data) => {
 function renderHand(tempCard = null) {
     const handEl = document.getElementById('yourHand');
     handEl.innerHTML = '';
+    resetCardDragState();
     
     // Hitung total kartu (hand + temp card)
     const totalCards = gameState.myHand.length + (tempCard ? 1 : 0);
     const canCloseHand = totalCards === 5;
+    const canDrag = canDragHandCards();
     
     // Jika ada kartu temporary (baru diambil), tampilkan dengan highlight
     if (tempCard) {
@@ -739,7 +1758,12 @@ function renderHand(tempCard = null) {
         cardDiv.className = `card ${isRed ? 'red' : 'black'} temp-card`;
         cardDiv.style.border = '4px solid #ffd700';
         cardDiv.style.animation = 'bounce 0.5s';
-        cardDiv.onclick = () => selectCard(-1);
+        cardDiv.dataset.cardIndex = '-1';
+        if (canDrag) {
+            cardDiv.classList.add('card-draggable');
+        }
+        cardDiv.addEventListener('click', (event) => handleCardClick(event, -1));
+        cardDiv.addEventListener('pointerdown', beginCardDrag);
         
         // Kartu temp dianggap selected jika selectedCardIndex === -1 atau null
         const isTempSelected = gameState.selectedCardIndex === -1 || gameState.selectedCardIndex === null;
@@ -759,7 +1783,12 @@ function renderHand(tempCard = null) {
         const cardDiv = document.createElement('div');
         const isRed = card.suit === '♥' || card.suit === '♦';
         cardDiv.className = `card ${isRed ? 'red' : 'black'}`;
-        cardDiv.onclick = () => selectCard(index);
+        cardDiv.dataset.cardIndex = String(index);
+        if (canDrag) {
+            cardDiv.classList.add('card-draggable');
+        }
+        cardDiv.addEventListener('click', (event) => handleCardClick(event, index));
+        cardDiv.addEventListener('pointerdown', beginCardDrag);
         
         const isSelected = gameState.selectedCardIndex === index;
         if (isSelected) {
@@ -781,11 +1810,14 @@ function renderHand(tempCard = null) {
 function updateActionButtons(canClose, hasSelection, hasTempCard) {
     const discardBtn = document.getElementById('discardButton');
     const closeBtn = document.getElementById('closeHandButton');
+    const blocked = isServerInteractionBlocked();
+    const canDragHand = canDragHandCards();
+    const canDragDiscard = canDragDiscardPileToHand();
     
     // Tombol buang: aktif jika ada kartu dipilih DAN ada tempCard
     if (discardBtn) {
-        discardBtn.disabled = !hasSelection || !hasTempCard;
-        if (hasSelection && hasTempCard) {
+        discardBtn.disabled = blocked || !hasSelection || !hasTempCard;
+        if (!blocked && hasSelection && hasTempCard) {
             discardBtn.style.opacity = '1';
             discardBtn.style.cursor = 'pointer';
         } else {
@@ -793,11 +1825,25 @@ function updateActionButtons(canClose, hasSelection, hasTempCard) {
             discardBtn.style.cursor = 'not-allowed';
         }
     }
+
+    updateDiscardDropZoneState(canDragHand ? 'ready' : 'idle');
+    updateCloseDropZoneState(canCloseWithDraggedCard() ? 'ready' : 'idle');
+    updateHandDropZoneState(canDragDiscard ? 'ready' : 'idle');
+
+    if (canDragDiscard) {
+        setDragHint('Tarik kartu buangan ke susunan kartu Anda.');
+    } else if (canDragHand) {
+        setDragHint('Tarik kartu ke area buangan atau tombol tutup kartu.');
+    } else if (blocked) {
+        setDragHint('Menunggu koneksi kembali sebelum melanjutkan aksi kartu.');
+    } else {
+        setDragHint('');
+    }
     
     // Tombol tutup: aktif jika 5 kartu DAN ada kartu dipilih
     if (closeBtn) {
-        closeBtn.disabled = !canClose || !hasSelection;
-        if (canClose && hasSelection) {
+        closeBtn.disabled = blocked || !canClose || !hasSelection;
+        if (!blocked && canClose && hasSelection) {
             closeBtn.style.opacity = '1';
             closeBtn.style.cursor = 'pointer';
         } else {
@@ -824,6 +1870,10 @@ function closeSelectedHand() {
 }
 
 function selectCard(index) {
+    if (!requireOnlineConnection('memilih kartu')) {
+        return;
+    }
+
     if (!gameState.hasDrawn && index !== -1) {
         showNotification('Ambil kartu dulu!', 'error');
         return;
@@ -840,6 +1890,10 @@ function selectCard(index) {
 
 // Draw card
 function drawCard(fromDiscard = false) {
+    if (!requireOnlineConnection('mengambil kartu')) {
+        return;
+    }
+
     if (gameState.hasDrawn) {
         showNotification('Anda sudah mengambil kartu!', 'error');
         return;
@@ -859,6 +1913,10 @@ socket.on('card_drawn', (data) => {
 
 // Discard card
 async function discardCard(index) {
+    if (!requireOnlineConnection('membuang kartu')) {
+        return;
+    }
+
     if (!gameState.hasDrawn) {
         showNotification('Ambil kartu dulu!', 'error');
         return;
@@ -949,6 +2007,7 @@ socket.on('chat_message', (data) => {
 
 // Game ended
 socket.on('game_ended', (data) => {
+    gameState.latestState = data.game_state;
     showScreen('gameOverScreen');
     displayGameOver(data.game_state);
     showNotification(data.message, 'info');
@@ -972,12 +2031,19 @@ socket.on('game_finished', (data) => {
     gameState.gameId = null;
     gameState.playerId = null;
     gameState.playerName = null;
+    gameState.latestState = null;
+    reconnectState.shouldAutoReconnect = false;
+    reconnectState.reconnectInProgress = false;
+    dismissModalSilently('ready-check');
+    readyCheckPromptOpen = false;
+    updateSavedSessionPanel();
     
     showNotification(data.message, 'warning');
     
     // Redirect to home after 2 seconds
     setTimeout(() => {
         showScreen('welcomeScreen');
+        updateSavedSessionPanel();
     }, 2000);
 });
 
@@ -988,15 +2054,24 @@ socket.on('redirect_home', () => {
     gameState.gameId = null;
     gameState.playerId = null;
     gameState.playerName = null;
+    gameState.latestState = null;
+    reconnectState.shouldAutoReconnect = false;
+    reconnectState.reconnectInProgress = false;
+    dismissModalSilently('ready-check');
+    readyCheckPromptOpen = false;
+    updateSavedSessionPanel();
     
     setTimeout(() => {
         showScreen('welcomeScreen');
+        updateSavedSessionPanel();
     }, 2000);
 });
 
 function displayGameOver(state) {
+    gameState.latestState = state;
     const winnerEl = document.getElementById('winnerAnnouncement');
     const rankingsEl = document.getElementById('rankingsList');
+    syncGameOverActions(state);
     
     if (state.winner) {
         winnerEl.innerHTML = `
@@ -1079,25 +2154,35 @@ function displayGameOver(state) {
         overallSection.style.display = 'none';
     }
     
-    // Show finish button for all players
+    syncGameOverActions(state);
+}
+
+function syncGameOverActions(state = gameState.latestState) {
+    const returnToLobbyBtn = document.getElementById('returnToLobbyBtn');
     const finishBtn = document.getElementById('finishGameBtn');
+    const isCreator = Boolean(state?.creator_name && state.creator_name === gameState.playerName);
+
+    if (returnToLobbyBtn) {
+        returnToLobbyBtn.innerHTML = '🏠 Ke Lobby';
+        returnToLobbyBtn.onclick = returnToLobby;
+        returnToLobbyBtn.style.display = 'block';
+    }
+
     if (finishBtn) {
-        finishBtn.style.display = 'block';
+        finishBtn.style.display = isCreator ? 'block' : 'none';
     }
 }
 
 // Leave game
 async function leaveGame() {
     const confirmed = await showCustomModal(
-        'Keluar dari Game?',
-        'Yakin ingin keluar dari game?\nProgress game tidak akan tersimpan.',
+        'Keluar dari Lobby?',
+        'Anda akan keluar dari lobby game ini. Skor ronde yang sudah selesai tetap tersimpan untuk game ini, tetapi Anda tidak ikut ronde berikutnya.',
         '🚪'
     );
     
     if (confirmed) {
-        localStorage.removeItem('kartu41_game_id');
-        localStorage.removeItem('kartu41_player_name');
-        location.reload();
+        socket.emit('leave_lobby');
     }
 }
 
@@ -1107,19 +2192,27 @@ function backToHome() {
     location.reload();
 }
 
-async function restartGame() {
+async function returnToLobby() {
+    if (!requireOnlineConnection('kembali ke lobby')) {
+        return;
+    }
+
     const confirmed = await showCustomModal(
-        'Main Lagi?',
-        'Giliran akan dimulai dari pemenang.\nSiap untuk ronde berikutnya?',
-        '🔄'
+        'Kembali ke Lobby?',
+        'Semua pemain akan kembali ke lobby. Game ID tetap sama dan skor kumulatif ronde sebelumnya tetap disimpan.',
+        '🏠'
     );
     
     if (confirmed) {
-        socket.emit('restart_game');
+        socket.emit('return_to_lobby');
     }
 }
 
 async function finishGame() {
+    if (!requireOnlineConnection('mengakhiri game')) {
+        return;
+    }
+
     const confirmed = await showCustomModal(
         'Akhiri Game?',
         'Game akan dihapus secara permanen dan ID game tidak bisa digunakan lagi.\nYakin ingin mengakhiri?',
@@ -1134,6 +2227,10 @@ async function finishGame() {
 }
 
 async function closeHandWithCard(cardIndex) {
+    if (!requireOnlineConnection('menutup kartu')) {
+        return;
+    }
+
     // Validasi apakah giliran pemain ini
     const currentTurnEl = document.getElementById('currentTurn');
     const currentPlayerId = currentTurnEl?.dataset?.playerId;
@@ -1188,6 +2285,10 @@ async function closeHandWithCard(cardIndex) {
 
 // Chat functions
 function sendMessage() {
+    if (!requireOnlineConnection('mengirim chat')) {
+        return;
+    }
+
     const input = document.getElementById('chatInput');
     const message = input.value.trim();
     
@@ -1311,42 +2412,90 @@ function updateChatBadge() {
 
 // Check for reconnect on page load
 window.addEventListener('load', async () => {
-    const savedGameId = localStorage.getItem('kartu41_game_id');
-    const savedPlayerName = localStorage.getItem('kartu41_player_name');
+    const savedSession = getSavedSession();
+    updateSavedSessionPanel();
     
-    if (savedGameId && savedPlayerName) {
+    if (savedSession) {
         const shouldReconnect = await showCustomModal(
             'Game Ditemukan!',
-            `Anda memiliki game yang sedang berlangsung:\n\nGame ID: ${savedGameId}\nNama: ${savedPlayerName}\n\nReconnect ke game?`,
+            `Anda memiliki game yang sedang berlangsung:\n\nGame ID: ${savedSession.gameId}\nNama: ${savedSession.playerName}\n\nReconnect ke game?`,
             '🔌'
         );
         
         if (shouldReconnect) {
-            gameState.gameId = savedGameId;
-            gameState.playerName = savedPlayerName;
+            gameState.gameId = savedSession.gameId;
+            gameState.playerName = savedSession.playerName;
             
             // Fill in the fields
-            document.getElementById('playerName').value = savedPlayerName;
-            document.getElementById('joinGameId').value = savedGameId;
+            document.getElementById('playerName').value = savedSession.playerName;
+            document.getElementById('joinGameId').value = savedSession.gameId;
             
-            // Auto join
-            socket.emit('join_game', { 
-                game_id: savedGameId, 
-                name: savedPlayerName 
-            });
+            if (socket.connected) {
+                reconnectState.shouldAutoReconnect = true;
+                attemptAutoReconnect();
+            } else {
+                reconnectState.shouldAutoReconnect = true;
+            }
         } else {
-            // Clear saved data
-            localStorage.removeItem('kartu41_game_id');
-            localStorage.removeItem('kartu41_player_name');
+            showWelcome();
+            updateSavedSessionPanel();
+            showNotification(`Game ${savedSession.gameId} tetap aktif. Anda bisa kembali dari menu utama.`, 'info');
         }
     }
 });
 
 // Error handling
 socket.on('error', (data) => {
+    if (reconnectState.reconnectInProgress) {
+        reconnectState.reconnectInProgress = false;
+    }
     showNotification(data.message, 'error');
 });
 
+socket.io.on('reconnect_attempt', () => {
+    if (hasActiveGameSession()) {
+        setConnectionState(
+            'reconnecting',
+            'Mencoba reconnect',
+            'Koneksi masih putus. Sistem sedang mencoba menyambung ulang ke server.'
+        );
+    }
+});
+
+socket.io.on('reconnect_failed', () => {
+    setConnectionState(
+        'offline',
+        'Reconnect gagal',
+        'Belum bisa tersambung kembali. Periksa jaringan Anda lalu coba refresh halaman.'
+    );
+});
+
+socket.on('connect_error', () => {
+    setConnectionState(
+        hasActiveGameSession() ? 'reconnecting' : 'offline',
+        hasActiveGameSession() ? 'Server belum merespons' : 'Belum tersambung',
+        hasActiveGameSession()
+            ? 'Kami masih mencoba menghubungkan Anda kembali ke game.'
+            : 'Koneksi ke server belum berhasil. Coba lagi sebentar lagi.'
+    );
+});
+
 socket.on('disconnect', () => {
+    const savedSession = getSavedSession();
+    reconnectState.shouldAutoReconnect = Boolean(savedSession);
+    reconnectState.reconnectInProgress = false;
+    if (savedSession) {
+        setConnectionState(
+            'reconnecting',
+            'Koneksi terputus',
+            'Game sedang mencoba menyambungkan Anda kembali. Jika gagal terlalu lama, refresh halaman.'
+        );
+    } else {
+        setConnectionState(
+            'offline',
+            'Koneksi terputus',
+            'Server sedang tidak dapat dijangkau. Beberapa aksi dikunci sampai koneksi kembali.'
+        );
+    }
     showNotification('Koneksi terputus!', 'error');
 });

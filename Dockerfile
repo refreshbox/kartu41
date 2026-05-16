@@ -23,7 +23,7 @@ RUN pip install --upgrade pip && \
 COPY . .
 
 # Expose port (adjust if your app uses a different port)
-EXPOSE 5000
+EXPOSE 4000
 
-# Default command with eventlet worker for WebSocket support
-CMD ["gunicorn", "-k", "eventlet", "-w", "1", "--timeout", "120", "--bind", "0.0.0.0:5000", "app:app"]
+# Default command with threaded worker + simple-websocket support
+CMD ["gunicorn", "-w", "1", "--threads", "100", "--timeout", "120", "--bind", "0.0.0.0:4000", "app:app"]
