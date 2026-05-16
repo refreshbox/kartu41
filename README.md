@@ -15,7 +15,7 @@ Aplikasi web game Kartu 41 menggunakan Python Flask dan Socket.IO untuk multipla
 1. Permainan dapat dimainkan oleh **2-6 orang**
 2. Setiap pemain mendapat **4 kartu** di awal permainan
 3. Setiap giliran: ambil 1 kartu → buang 1 kartu
-4. **Timer Mode**: Setiap pemain punya **20 detik** per giliran (bisa dinonaktifkan)
+4. **Timer Mode**: Setiap pemain punya **30 detik** per giliran (default nonaktif)
 5. Tujuan: Kumpulkan kartu dengan total nilai **41** dan **kembang yang sama**
 6. **Penting**: Jika kartu tidak sama kembang, nilai kartu yang beda kembang akan dikurangi dari total
 7. Pemain offline akan otomatis dikeluarkan saat game dimulai jika pemain online ≥ 2
@@ -34,19 +34,20 @@ Aplikasi web game Kartu 41 menggunakan Python Flask dan Socket.IO untuk multipla
 docker build -t kartu41 .
 
 # Run container
-docker run -d -p 5000:5000 kartu41
+docker run -d -p 4000:4000 kartu41
 
 # Atau dengan environment variables
-docker run -d -p 5000:5000 \
+docker run -d -p 4000:4000 \
   -e FLASK_SECRET_KEY=your_secret_key \
   -e SOCKET_IO_PATH=/socket.io \
   -e BASE_HREF=/ \
+  -e DATABASE_FILE=/app/data/kartu41.db \
   kartu41
 ```
 
-**Note:** Container menggunakan Gunicorn dengan eventlet worker untuk mendukung WebSocket:
+**Note:** Container menggunakan Gunicorn multi-threaded dengan `simple-websocket` untuk mendukung Socket.IO tanpa `eventlet`:
 ```bash
-gunicorn -k eventlet -w 1 --timeout 120 --bind 0.0.0.0:5000 app:app
+gunicorn -w 1 --threads 100 --timeout 120 --bind 0.0.0.0:4000 app:app
 ```
 
 ### Manual Installation
@@ -65,6 +66,12 @@ cp .env.example .env
 # Edit .env sesuai kebutuhan
 ```
 
+Variabel yang didukung:
+- `FLASK_SECRET_KEY` - secret key Flask
+- `SOCKET_IO_PATH` - path Socket.IO
+- `BASE_HREF` - base path aplikasi
+- `DATABASE_FILE` - lokasi file SQLite, default `kartu41.db`
+
 ### 4. Jalankan Aplikasi
 
 **Development mode:**
@@ -74,13 +81,18 @@ python app.py
 
 **Production mode (recommended):**
 ```bash
-gunicorn -k eventlet -w 1 --timeout 120 --bind 0.0.0.0:5000 app:app
+gunicorn -w 1 --threads 100 --timeout 120 --bind 0.0.0.0:4000 app:app
 ```
 
-**Note:** Gunakan eventlet worker untuk mendukung WebSocket/Socket.IO
+**Note:** Konfigurasi ini memakai mode `threading` Flask-SocketIO dan paket `simple-websocket`, jadi tidak bergantung pada `eventlet` yang sudah deprecated.
 
 ### 5. Buka Browser
-Akses aplikasi di: `http://localhost:5000`
+Akses aplikasi di: `http://localhost:4000`
+
+### 6. Jalankan Regression Test Backend
+```bash
+./.venv/bin/python -m unittest tests.test_backend_regressions tests.test_socketio_runtime
+```
 
 ## Cara Bermain
 
@@ -103,11 +115,11 @@ Akses aplikasi di: `http://localhost:5000`
 4. Pilih kartu yang ingin dibuang
 5. Klik tombol **"Buang"** pada kartu tersebut
 6. Giliran akan berpindah ke pemain berikutnya
-7. ⚠️ Jika waktu habis (20 detik), kartu akan otomatis dimainkan
+7. ⚠️ Jika waktu habis (30 detik), kartu akan otomatis dimainkan
 
 ### Timer Mode:
 - Timer bisa diaktifkan/dinonaktifkan oleh pembuat game di lobby
-- Saat aktif: setiap pemain punya 20 detik per giliran
+- Saat aktif: setiap pemain punya 30 detik per giliran
 - Countdown terlihat oleh semua pemain
 - Auto-play jika waktu habis: sistem akan ambil kartu dan buang kartu tertinggi otomatis
 
@@ -115,7 +127,7 @@ Akses aplikasi di: `http://localhost:5000`
 
 ✅ Multiplayer real-time menggunakan WebSocket  
 ✅ **2-6 pemain** per game  
-✅ **Timer Mode** - 20 detik per giliran dengan countdown yang terlihat semua pemain  
+✅ **Timer Mode** - 30 detik per giliran dengan countdown yang terlihat semua pemain  
 ✅ **Auto-play** - Kartu otomatis dimainkan jika waktu habis  
 ✅ **Smart paste** - Game ID otomatis terdeteksi dari teks yang di-paste  
 ✅ **Pemain offline** - Otomatis dikeluarkan saat game dimulai jika pemain online cukup  
@@ -160,6 +172,7 @@ kartu41/
 
 - **Backend**: Python Flask
 - **Real-time**: Flask-SocketIO (WebSocket)
+- **WebSocket Runtime**: Python threading + simple-websocket
 - **Database**: SQLite
 - **Frontend**: HTML5, CSS3, JavaScript
 - **Containerization**: Docker
@@ -198,10 +211,17 @@ Score: 10 + 9 + 8 - 5 = **22** (5♥ dikurangi karena beda kembang)
 ### Port sudah digunakan:
 Ubah port di `app.py`:
 ```python
-socketio.run(app, debug=True, host='0.0.0.0', port=5001)
+socketio.run(app, debug=True, host='0.0.0.0', port=4001)
 ```
 
 ### Module tidak ditemukan:
+```bash
+pip install -r requirements.txt
+```
+
+### Warning eventlet deprecated:
+Project ini sudah dikonfigurasi untuk tidak memakai `eventlet`.
+Pastikan dependency terpasang ulang:
 ```bash
 pip install -r requirements.txt
 ```

@@ -12,6 +12,16 @@
 </head>
 <body>
     <div class="container">
+        <div id="connectionStatusBadge" class="connection-status-badge connection-status-connecting">
+            <span class="connection-status-dot"></span>
+            <span id="connectionStatusText">Menyambung...</span>
+        </div>
+
+        <div id="connectionBanner" class="connection-banner">
+            <div id="connectionBannerTitle" class="connection-banner-title"></div>
+            <div id="connectionBannerMessage" class="connection-banner-message"></div>
+        </div>
+
         <!-- Welcome Screen -->
         <div id="welcomeScreen" class="screen active">
             <div class="welcome-card">
@@ -41,6 +51,19 @@
                     <button class="btn btn-secondary" onclick="showJoinGame()">
                         🚪 Gabung Game
                     </button>
+                </div>
+
+                <div id="savedSessionPanel" class="saved-session-panel" style="display: none;">
+                    <div class="saved-session-title">🎯 Game aktif ditemukan</div>
+                    <p class="saved-session-text">
+                        Game ID <strong id="savedSessionGameId"></strong> sedang aktif untuk
+                        <strong id="savedSessionPlayerName"></strong>.
+                    </p>
+                    <div class="button-group saved-session-actions">
+                        <button class="btn btn-primary" onclick="reconnectSavedGame()">
+                            🔌 Kembali ke Game
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -79,20 +102,67 @@
                     <h3>👥 Pemain (<span id="playerCount">0</span>/6)</h3>
                     <div id="playersList"></div>
                 </div>
+
+                <div id="readyCheckPanel" class="ready-check-panel" style="display: none;">
+                    <h3>✅ Konfirmasi Mulai</h3>
+                    <p id="readyCheckMessage" class="ready-check-message"></p>
+                    <div id="readyCheckSummary" class="ready-check-summary"></div>
+                    <div id="readyCheckActions" class="button-group" style="display: none; margin-top: 14px;">
+                        <button class="btn btn-primary" onclick="respondReadyCheck(true)">
+                            ✅ Siap
+                        </button>
+                        <button class="btn btn-secondary" onclick="respondReadyCheck(false)">
+                            ⏳ Nanti Dulu
+                        </button>
+                    </div>
+                </div>
                 
                 <div class="game-settings" id="gameSettings" style="margin: 20px 0; padding: 15px; background: rgba(255,255,255,0.1); border-radius: 10px; display: none;">
-                    <h3 style="margin-bottom: 15px; color: white;">⚙️ Pengaturan Game</h3>
+                    <h3 style="margin-bottom: 15px; color: black;">⚙️ Pengaturan Game</h3>
+                    <p id="gameSettingsAccessNote" style="color: #000000; font-size: 0.85em; margin-bottom: 14px;"></p>
                     <div style="display: flex; align-items: center; justify-content: space-between;">
-                        <label style="color: white; font-size: 1em;">
-                            ⏱️ Mode Timer (20 detik per giliran)
+                        <label style="color: black; font-size: 1em;">
+                            ⏱️ Mode Timer (30 detik per giliran)
                         </label>
                         <label class="timer-switch">
-                            <input type="checkbox" id="timerToggle" checked onchange="toggleTimerMode()">
+                            <input type="checkbox" id="timerToggle" onchange="toggleTimerMode()">
                             <span class="timer-slider"></span>
                         </label>
                     </div>
                     <p style="color: #000000; font-size: 0.85em; margin-top: 10px; margin-bottom: 0;">
-                        Jika aktif, pemain hanya punya 20 detik untuk mengambil dan membuang kartu. Jika waktu habis, sistem akan otomatis mengambil dan membuang kartu.
+                        Jika aktif, pemain hanya punya waktu 30 detik untuk menyelesaikan gilirannya. Jika waktu habis, sistem akan otomatis mengambil dan membuang kartu.
+                    </p>
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 16px;">
+                        <label style="color: black; font-size: 1em;">
+                            🔀 Acak urutan pemain
+                        </label>
+                        <label class="timer-switch">
+                            <input type="checkbox" id="randomizePlayerOrderToggle" onchange="toggleRandomizePlayerOrder()">
+                            <span class="timer-slider"></span>
+                        </label>
+                    </div>
+                    <p style="color: #000000; font-size: 0.85em; margin-top: 10px; margin-bottom: 0;">
+                        Jika aktif, urutan pemain yang ambil dan buang kartu akan diacak mulai ronde berikutnya. Jika nonaktif, urutan tetap mengikuti susunan pemain yang sekarang.
+                    </p>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; flex-wrap: wrap;">
+                        <label for="botTurnDelayInput" style="color: black; font-size: 1em;">
+                            🤖 Ambil alih bot setelah pemain putus
+                        </label>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <input
+                                type="number"
+                                id="botTurnDelayInput"
+                                min="0"
+                                step="1"
+                                value="30"
+                                onchange="updateBotTurnDelaySetting()"
+                                style="width: 96px; padding: 10px 12px; border-radius: 10px; border: none; font-size: 1em; text-align: right;"
+                            >
+                            <span style="color: black; font-weight: 600;">detik</span>
+                        </div>
+                    </div>
+                    <p style="color: #000000; font-size: 0.85em; margin-top: 10px; margin-bottom: 0;">
+                        Default 30 detik. Isi 0 jika bot harus langsung mengambil alih saat pemain terputus.
                     </p>
                 </div>
                 
@@ -129,7 +199,7 @@
                     </div>
                     <div class="info-item" id="timerContainer" style="display: none;">
                         <span class="label">⏱️ Waktu:</span>
-                        <span id="turnTimer" class="value" style="font-weight: bold; color: #28a745;">20</span>
+                        <span id="turnTimer" class="value" style="font-weight: bold; color: #28a745;">30</span>
                     </div>
                 </div>
             </div>
@@ -164,13 +234,16 @@
                     <!-- Deck Area -->
                     <div class="deck-area">
                     <div class="deck-card" onclick="drawCard(false)">
+                        <div class="deck-stack-layer deck-stack-layer-back"></div>
+                        <div class="deck-stack-layer deck-stack-layer-mid"></div>
+                        <div class="deck-stack-shadow"></div>
                         <div class="card-back">
                             <div class="deck-icon">🎴</div>
                             <div class="deck-text">Ambil</div>
                         </div>
                     </div>
                     
-                    <div id="discardPileArea" class="discard-pile-area" style="display: none;">
+                    <div id="discardPileArea" class="discard-pile-area">
                         <div class="discard-pile-card" id="discardPileCard">
                             <!-- Kartu buangan akan ditampilkan di sini -->
                         </div>
@@ -183,15 +256,16 @@
                         <div class="player-info">
                             <h3 id="yourName"></h3>
                         </div>
-                        <div class="hand-cards" id="yourHand"></div>
+                        <div class="hand-cards hand-drop-zone" id="yourHand"></div>
                         <div class="action-buttons-container">
-                            <button id="discardButton" class="btn-discard" onclick="discardSelectedCard()" disabled>
+                            <button id="discardButton" class="btn-discard discard-drop-zone" onclick="discardSelectedCard()" disabled>
                                 Buang Kartu
                             </button>
-                            <button id="closeHandButton" class="btn-close-hand" onclick="closeSelectedHand()" disabled>
+                            <button id="closeHandButton" class="btn-close-hand close-drop-zone" onclick="closeSelectedHand()" disabled>
                                 Tutup Kartu
                             </button>
                         </div>
+                        <div class="drag-hint" id="dragHint"></div>
                     </div>
                     
                     <!-- Daftar Pemain (di bawah) -->
@@ -223,8 +297,8 @@
                 </div>
                 
                 <div class="button-group">
-                    <button class="btn btn-primary" onclick="restartGame()">
-                        🔄 Main Lagi
+                    <button id="returnToLobbyBtn" class="btn btn-primary" onclick="returnToLobby()">
+                        🏠 Ke Lobby
                     </button>
                     <button id="finishGameBtn" class="btn btn-danger" onclick="finishGame()" style="display: none;">
                         🏁 Selesai
