@@ -41,7 +41,8 @@ let connectionState = {
 let turnTimer = {
     interval: null,
     secondsLeft: 30,
-    isRunning: false
+    isRunning: false,
+    activeTurnKey: null
 };
 
 let dragState = {
@@ -62,6 +63,17 @@ function isMyActiveTurn() {
     return gameState.latestState?.current_player_id === gameState.playerId;
 }
 
+function canRunTurnTimer(state = gameState.latestState) {
+    return Boolean(
+        state &&
+        state.game_started &&
+        !state.game_ended &&
+        state.use_timer &&
+        state.current_player_id === gameState.playerId &&
+        isScreenActive('gameScreen')
+    );
+}
+
 function canDragHandCards() {
     return Boolean(
         isMyActiveTurn() &&
@@ -76,6 +88,14 @@ function canDragDiscardPileToHand() {
         isMyActiveTurn() &&
         !gameState.hasDrawn &&
         gameState.latestState?.last_discarded_card &&
+        !isServerInteractionBlocked()
+    );
+}
+
+function canDragDeckToHand() {
+    return Boolean(
+        isMyActiveTurn() &&
+        !gameState.hasDrawn &&
         !isServerInteractionBlocked()
     );
 }
@@ -99,6 +119,10 @@ function getCloseDropZone() {
 
 function getHandDropZone() {
     return document.getElementById('yourHand');
+}
+
+function getDeckDragSource() {
+    return document.getElementById('deckCard');
 }
 
 function setDragHint(message = '') {
@@ -193,7 +217,7 @@ function resetCardDragState() {
     updateDiscardDropZoneState(canDragHandCards() ? 'ready' : 'idle');
     updateDiscardButtonDropZoneState(canDragHandCards() ? 'ready' : 'idle');
     updateCloseDropZoneState(canCloseWithDraggedCard() ? 'ready' : 'idle');
-    updateHandDropZoneState(canDragDiscardPileToHand() ? 'ready' : 'idle');
+    updateHandDropZoneState((canDragDiscardPileToHand() || canDragDeckToHand()) ? 'ready' : 'idle');
 }
 
 function pointInsideElement(element, clientX, clientY) {
@@ -211,9 +235,23 @@ function pointInsideElement(element, clientX, clientY) {
 }
 
 function createDragPreview(sourceEl) {
-    const preview = sourceEl.cloneNode(true);
-    preview.classList.remove('selected', 'temp-card', 'dragging-source');
-    preview.classList.add('drag-card-preview');
+    let preview;
+
+    if (dragState.kind === 'deck') {
+        preview = document.createElement('div');
+        preview.className = 'drag-card-preview deck-drag-preview';
+        preview.innerHTML = `
+            <div class="card-back">
+                <div class="deck-icon">🎴</div>
+                <div class="deck-text">Ambil</div>
+            </div>
+        `;
+    } else {
+        preview = sourceEl.cloneNode(true);
+        preview.classList.remove('selected', 'temp-card', 'dragging-source');
+        preview.classList.add('drag-card-preview');
+    }
+
     document.body.appendChild(preview);
     return preview;
 }
@@ -284,6 +322,34 @@ function beginDiscardPileDrag(event) {
     }
 }
 
+function beginDeckDrag(event) {
+    if (!canDragDeckToHand()) {
+        return;
+    }
+
+    if (event.pointerType === 'mouse' && event.button !== 0) {
+        return;
+    }
+
+    const deckEl = event.currentTarget;
+    const bounds = deckEl.getBoundingClientRect();
+
+    dragState.pointerId = event.pointerId;
+    dragState.kind = 'deck';
+    dragState.cardIndex = null;
+    dragState.sourceEl = deckEl;
+    dragState.previewEl = null;
+    dragState.startX = event.clientX;
+    dragState.startY = event.clientY;
+    dragState.offsetX = event.clientX - bounds.left;
+    dragState.offsetY = event.clientY - bounds.top;
+    dragState.hasDragged = false;
+
+    if (typeof deckEl.setPointerCapture === 'function') {
+        deckEl.setPointerCapture(event.pointerId);
+    }
+}
+
 function getHandCardDropTarget(clientX, clientY) {
     if (canCloseWithDraggedCard() && pointInsideElement(getCloseDropZone(), clientX, clientY)) {
         return 'close';
@@ -302,7 +368,10 @@ function getHandCardDropTarget(clientX, clientY) {
 }
 
 function getDiscardPileDropTarget(clientX, clientY) {
-    if (canDragDiscardPileToHand() && pointInsideElement(getHandDropZone(), clientX, clientY)) {
+    if (
+        (canDragDiscardPileToHand() || canDragDeckToHand()) &&
+        pointInsideElement(getHandDropZone(), clientX, clientY)
+    ) {
         return 'hand';
     }
 
@@ -326,15 +395,17 @@ function moveCardDrag(event) {
         dragState.sourceEl.classList.add('dragging-source');
         if (dragState.kind === 'discard-pile') {
             setDragHint('Lepaskan kartu buangan ke susunan kartu Anda.');
+        } else if (dragState.kind === 'deck') {
+            setDragHint('Lepaskan deck ke susunan kartu Anda.');
         } else {
             setDragHint('Lepaskan kartu ke area buangan atau tombol tutup kartu.');
         }
     }
 
     positionDragPreview(event.clientX, event.clientY);
-    if (dragState.kind === 'discard-pile') {
+    if (dragState.kind === 'discard-pile' || dragState.kind === 'deck') {
         const dropTarget = getDiscardPileDropTarget(event.clientX, event.clientY);
-        updateHandDropZoneState(dropTarget === 'hand' ? 'active' : (canDragDiscardPileToHand() ? 'ready' : 'idle'));
+        updateHandDropZoneState(dropTarget === 'hand' ? 'active' : ((canDragDiscardPileToHand() || canDragDeckToHand()) ? 'ready' : 'idle'));
     } else {
         const dropTarget = getHandCardDropTarget(event.clientX, event.clientY);
         updateDiscardDropZoneState(dropTarget === 'discard' ? 'active' : (canDragHandCards() ? 'ready' : 'idle'));
@@ -351,7 +422,7 @@ function finishCardDrag(event) {
     const dragKind = dragState.kind;
     const droppedCardIndex = dragState.cardIndex;
     const hadDragged = dragState.hasDragged;
-    const dropTarget = dragKind === 'discard-pile'
+    const dropTarget = (dragKind === 'discard-pile' || dragKind === 'deck')
         ? getDiscardPileDropTarget(event.clientX, event.clientY)
         : getHandCardDropTarget(event.clientX, event.clientY);
 
@@ -367,12 +438,18 @@ function finishCardDrag(event) {
 
     if (dragKind === 'discard-pile' && hadDragged && dropTarget === 'hand') {
         drawCard(true);
+    } else if (dragKind === 'deck' && hadDragged && dropTarget === 'hand') {
+        drawCard(false);
     } else if (dragKind === 'hand-card' && hadDragged && dropTarget === 'discard') {
-        discardCard(droppedCardIndex);
+        discardCard(droppedCardIndex, { skipConfirmation: true });
     } else if (dragKind === 'hand-card' && hadDragged && dropTarget === 'close') {
-        closeHandWithCard(droppedCardIndex);
+        closeHandWithCard(droppedCardIndex, { skipConfirmation: true });
+    } else if (canDragDiscardPileToHand() && canDragDeckToHand()) {
+        setDragHint('Tarik deck atau kartu buangan ke susunan kartu Anda.');
     } else if (canDragDiscardPileToHand()) {
         setDragHint('Tarik kartu buangan ke susunan kartu Anda.');
+    } else if (canDragDeckToHand()) {
+        setDragHint('Tarik deck ke susunan kartu Anda.');
     } else if (canDragHandCards()) {
         setDragHint('Tarik kartu ke area buangan atau tombol tutup kartu.');
     } else {
@@ -386,8 +463,12 @@ function cancelCardDrag(event) {
     }
 
     resetCardDragState();
-    if (canDragDiscardPileToHand()) {
+    if (canDragDiscardPileToHand() && canDragDeckToHand()) {
+        setDragHint('Tarik deck atau kartu buangan ke susunan kartu Anda.');
+    } else if (canDragDiscardPileToHand()) {
         setDragHint('Tarik kartu buangan ke susunan kartu Anda.');
+    } else if (canDragDeckToHand()) {
+        setDragHint('Tarik deck ke susunan kartu Anda.');
     } else if (canDragHandCards()) {
         setDragHint('Tarik kartu ke area buangan atau tombol tutup kartu.');
     } else {
@@ -417,9 +498,26 @@ function handleDiscardPileClick(event) {
     drawCard(true);
 }
 
+function handleDeckClick(event) {
+    if (dragState.suppressClick) {
+        dragState.suppressClick = false;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+    }
+
+    drawCard(false);
+}
+
 window.addEventListener('pointermove', moveCardDrag);
 window.addEventListener('pointerup', finishCardDrag);
 window.addEventListener('pointercancel', cancelCardDrag);
+
+const deckDragSource = getDeckDragSource();
+if (deckDragSource && !deckDragSource.dataset.dragBound) {
+    deckDragSource.addEventListener('pointerdown', beginDeckDrag);
+    deckDragSource.dataset.dragBound = 'true';
+}
 
 // Play notification sound
 function playNotificationSound() {
@@ -456,11 +554,25 @@ function playCardDiscardSound() {
 }
 
 // Timer functions
-function startTurnTimer() {
+function getActiveTurnTimerKey(state = gameState.latestState) {
+    if (!canRunTurnTimer(state)) {
+        return null;
+    }
+
+    return `${state.round_number || 0}:${state.current_player_id}`;
+}
+
+function startTurnTimer(turnKey = getActiveTurnTimerKey()) {
+    if (!turnKey) {
+        stopTurnTimer();
+        return;
+    }
+
     stopTurnTimer(); // Stop any existing timer
     
     turnTimer.secondsLeft = 30;
     turnTimer.isRunning = true;
+    turnTimer.activeTurnKey = turnKey;
     
     const timerContainer = document.getElementById('timerContainer');
     const timerEl = document.getElementById('turnTimer');
@@ -494,10 +606,15 @@ function stopTurnTimer() {
         turnTimer.interval = null;
     }
     turnTimer.isRunning = false;
+    turnTimer.activeTurnKey = null;
     
     const timerContainer = document.getElementById('timerContainer');
+    const timerEl = document.getElementById('turnTimer');
     if (timerContainer) {
         timerContainer.style.display = 'none';
+    }
+    if (timerEl) {
+        timerEl.style.animation = 'none';
     }
 }
 
@@ -510,8 +627,10 @@ function updateTimerDisplay() {
     // Ubah warna berdasarkan waktu tersisa
     if (turnTimer.secondsLeft > 10) {
         timerEl.style.color = '#28a745'; // Hijau
+        timerEl.style.animation = 'none';
     } else if (turnTimer.secondsLeft > 5) {
         timerEl.style.color = '#ffc107'; // Kuning
+        timerEl.style.animation = 'none';
     } else {
         timerEl.style.color = '#dc3545'; // Merah
         timerEl.style.animation = 'pulse 0.5s infinite';
@@ -835,6 +954,9 @@ function updateConnectionUI() {
 
 // Screen management
 function showScreen(screenId) {
+    if (screenId !== 'gameScreen') {
+        stopTurnTimer();
+    }
     document.querySelectorAll('.screen').forEach(screen => {
         screen.classList.remove('active');
     });
@@ -1044,6 +1166,7 @@ function updateLobby(state) {
     if (state.game_id) {
         gameState.gameId = state.game_id;
     }
+    stopTurnTimer();
 
     const playersList = document.getElementById('playersList');
     const playerCount = document.getElementById('playerCount');
@@ -1143,16 +1266,28 @@ function updateLobby(state) {
     }
 
     if (timerToggle) {
-        timerToggle.disabled = isBlocked || !isCreator || readyCheckActive;
+        const timerToggleDisabled = isBlocked || !isCreator || readyCheckActive;
+        timerToggle.disabled = timerToggleDisabled;
         timerToggle.title = isCreator
             ? 'Aktifkan atau nonaktifkan mode timer'
             : 'Hanya pembuat game yang bisa mengubah mode timer';
+        const timerSwitch = timerToggle.closest('.timer-switch');
+        if (timerSwitch) {
+            timerSwitch.classList.toggle('is-disabled', timerToggleDisabled);
+            timerSwitch.setAttribute('aria-disabled', timerToggleDisabled ? 'true' : 'false');
+        }
     }
     if (randomizePlayerOrderToggle) {
-        randomizePlayerOrderToggle.disabled = isBlocked || !isCreator || readyCheckActive;
+        const randomizeDisabled = isBlocked || !isCreator || readyCheckActive;
+        randomizePlayerOrderToggle.disabled = randomizeDisabled;
         randomizePlayerOrderToggle.title = isCreator
             ? 'Aktifkan atau nonaktifkan pengacakan urutan pemain'
             : 'Hanya pembuat game yang bisa mengubah urutan pemain';
+        const randomizeSwitch = randomizePlayerOrderToggle.closest('.timer-switch');
+        if (randomizeSwitch) {
+            randomizeSwitch.classList.toggle('is-disabled', randomizeDisabled);
+            randomizeSwitch.setAttribute('aria-disabled', randomizeDisabled ? 'true' : 'false');
+        }
     }
     if (botTurnDelayInput) {
         botTurnDelayInput.disabled = isBlocked || !isCreator || readyCheckActive;
@@ -1211,6 +1346,15 @@ function toggleTimerMode() {
         return;
     }
 
+    if (gameState.latestState?.creator_name !== gameState.playerName) {
+        const timerToggle = document.getElementById('timerToggle');
+        if (timerToggle) {
+            timerToggle.checked = Boolean(gameState.latestState?.use_timer);
+        }
+        showNotification('Hanya pembuat game yang bisa mengubah mode timer.', 'error');
+        return;
+    }
+
     const timerToggle = document.getElementById('timerToggle');
     const useTimer = timerToggle.checked;
     
@@ -1219,6 +1363,15 @@ function toggleTimerMode() {
 
 function toggleRandomizePlayerOrder() {
     if (!requireOnlineConnection('mengubah urutan pemain')) {
+        return;
+    }
+
+    if (gameState.latestState?.creator_name !== gameState.playerName) {
+        const randomizeToggle = document.getElementById('randomizePlayerOrderToggle');
+        if (randomizeToggle) {
+            randomizeToggle.checked = Boolean(gameState.latestState?.randomize_player_order);
+        }
+        showNotification('Hanya pembuat game yang bisa mengubah urutan pemain.', 'error');
         return;
     }
 
@@ -1232,6 +1385,15 @@ function toggleRandomizePlayerOrder() {
 
 function updateBotTurnDelaySetting() {
     if (!requireOnlineConnection('mengubah delay takeover bot')) {
+        return;
+    }
+
+    if (gameState.latestState?.creator_name !== gameState.playerName) {
+        const botTurnDelayInput = document.getElementById('botTurnDelayInput');
+        if (botTurnDelayInput && gameState.latestState?.bot_turn_delay_seconds !== undefined) {
+            botTurnDelayInput.value = gameState.latestState.bot_turn_delay_seconds;
+        }
+        showNotification('Hanya pembuat game yang bisa mengubah takeover bot.', 'error');
         return;
     }
 
@@ -1262,6 +1424,15 @@ socket.on('timer_toggled', (data) => {
     const timerToggle = document.getElementById('timerToggle');
     if (timerToggle) {
         timerToggle.checked = data.use_timer;
+    }
+
+    if (!data.use_timer) {
+        stopTurnTimer();
+    } else if (canRunTurnTimer()) {
+        const nextTurnKey = getActiveTurnTimerKey();
+        if (!turnTimer.isRunning || turnTimer.activeTurnKey !== nextTurnKey) {
+            startTurnTimer(nextTurnKey);
+        }
     }
     
     const message = data.use_timer ? 'Mode timer diaktifkan' : 'Mode timer dinonaktifkan';
@@ -1452,6 +1623,7 @@ socket.on('ready_check_cancelled', (data) => {
 socket.on('returned_to_lobby', (data) => {
     dismissModalSilently('ready-check');
     readyCheckPromptOpen = false;
+    stopTurnTimer();
     showScreen('lobbyScreen');
     document.getElementById('lobbyGameId').textContent = gameState.gameId;
     updateLobby(data.game_state);
@@ -1468,6 +1640,7 @@ socket.on('lobby_updated', (data) => {
 });
 
 socket.on('left_lobby', (data) => {
+    stopTurnTimer();
     localStorage.removeItem('kartu41_game_id');
     localStorage.removeItem('kartu41_player_name');
     gameState.gameId = null;
@@ -1481,6 +1654,7 @@ socket.on('left_lobby', (data) => {
 });
 
 socket.on('kicked_from_lobby', (data) => {
+    stopTurnTimer();
     localStorage.removeItem('kartu41_game_id');
     localStorage.removeItem('kartu41_player_name');
     gameState.gameId = null;
@@ -1534,9 +1708,14 @@ function updateGameState(state) {
     if (isMyTurn) {
         currentTurnEl.style.color = '#28a745';
         currentTurnEl.style.fontWeight = 'bold';
-        // Mulai timer saat giliran pemain (hanya jika use_timer aktif)
-        if (state.use_timer) {
-            startTurnTimer();
+        // Jangan reset timer saat state hanya berubah karena pemain yang sama baru ambil kartu.
+        if (canRunTurnTimer(state)) {
+            const nextTurnKey = getActiveTurnTimerKey(state);
+            if (!turnTimer.isRunning || turnTimer.activeTurnKey !== nextTurnKey) {
+                startTurnTimer(nextTurnKey);
+            }
+        } else {
+            stopTurnTimer();
         }
     } else {
         currentTurnEl.style.color = '#667eea';
@@ -1828,10 +2007,14 @@ function updateActionButtons(canClose, hasSelection, hasTempCard) {
 
     updateDiscardDropZoneState(canDragHand ? 'ready' : 'idle');
     updateCloseDropZoneState(canCloseWithDraggedCard() ? 'ready' : 'idle');
-    updateHandDropZoneState(canDragDiscard ? 'ready' : 'idle');
+    updateHandDropZoneState((canDragDiscard || canDragDeckToHand()) ? 'ready' : 'idle');
 
-    if (canDragDiscard) {
+    if (canDragDiscard && canDragDeckToHand()) {
+        setDragHint('Tarik deck atau kartu buangan ke susunan kartu Anda.');
+    } else if (canDragDiscard) {
         setDragHint('Tarik kartu buangan ke susunan kartu Anda.');
+    } else if (canDragDeckToHand()) {
+        setDragHint('Tarik deck ke susunan kartu Anda.');
     } else if (canDragHand) {
         setDragHint('Tarik kartu ke area buangan atau tombol tutup kartu.');
     } else if (blocked) {
@@ -1912,7 +2095,7 @@ socket.on('card_drawn', (data) => {
 });
 
 // Discard card
-async function discardCard(index) {
+async function discardCard(index, options = {}) {
     if (!requireOnlineConnection('membuang kartu')) {
         return;
     }
@@ -1950,7 +2133,9 @@ async function discardCard(index) {
         <p style="margin-top: 10px; color: #666;">Yakin ingin membuang kartu ini?</p>
     `;
     
-    const confirmed = await showCustomModal(title, '', '🗑️', cardHTML);
+    const confirmed = options.skipConfirmation
+        ? true
+        : await showCustomModal(title, '', '🗑️', cardHTML);
     
     if (confirmed) {
         stopTurnTimer(); // Stop timer saat buang kartu
@@ -2007,6 +2192,7 @@ socket.on('chat_message', (data) => {
 
 // Game ended
 socket.on('game_ended', (data) => {
+    stopTurnTimer();
     gameState.latestState = data.game_state;
     showScreen('gameOverScreen');
     displayGameOver(data.game_state);
@@ -2025,6 +2211,7 @@ socket.on('game_restarted', (data) => {
 
 // Game finished permanently
 socket.on('game_finished', (data) => {
+    stopTurnTimer();
     // Clear game state
     localStorage.removeItem('kartu41_game_id');
     localStorage.removeItem('kartu41_player_name');
@@ -2049,6 +2236,7 @@ socket.on('game_finished', (data) => {
 
 // Redirect home for creator
 socket.on('redirect_home', () => {
+    stopTurnTimer();
     localStorage.removeItem('kartu41_game_id');
     localStorage.removeItem('kartu41_player_name');
     gameState.gameId = null;
@@ -2068,6 +2256,7 @@ socket.on('redirect_home', () => {
 });
 
 function displayGameOver(state) {
+    stopTurnTimer();
     gameState.latestState = state;
     const winnerEl = document.getElementById('winnerAnnouncement');
     const rankingsEl = document.getElementById('rankingsList');
@@ -2226,7 +2415,7 @@ async function finishGame() {
     }
 }
 
-async function closeHandWithCard(cardIndex) {
+async function closeHandWithCard(cardIndex, options = {}) {
     if (!requireOnlineConnection('menutup kartu')) {
         return;
     }
@@ -2265,12 +2454,14 @@ async function closeHandWithCard(cardIndex) {
         <p style="margin-top: 10px; color: #666;">Game akan berakhir dan score semua pemain akan ditampilkan.</p>
     `;
     
-    const confirmed = await showCustomModal(
-        'Tutup Kartu?',
-        '',
-        '🎯',
-        cardHTML
-    );
+    const confirmed = options.skipConfirmation
+        ? true
+        : await showCustomModal(
+            'Tutup Kartu?',
+            '',
+            '🎯',
+            cardHTML
+        );
     
     if (confirmed) {
         // Buang kartu terlebih dahulu, lalu tutup

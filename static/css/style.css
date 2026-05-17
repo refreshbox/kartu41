@@ -439,6 +439,20 @@ body {
     cursor: not-allowed;
 }
 
+.timer-switch.is-disabled {
+    pointer-events: none;
+}
+
+.timer-switch.is-disabled .timer-slider {
+    background-color: #d7d9e0 !important;
+    opacity: 0.75;
+    cursor: not-allowed;
+}
+
+.timer-switch.is-disabled .timer-slider:before {
+    background-color: #f8f9fb;
+}
+
 /* Game Screen */
 #gameScreen {
     background: transparent;
@@ -917,6 +931,8 @@ body {
     justify-content: center;
     overflow: visible;
     isolation: isolate;
+    touch-action: none;
+    user-select: none;
 }
 
 .deck-card:hover {
@@ -1346,6 +1362,11 @@ body {
     pointer-events: none;
     transform: rotate(-6deg);
     box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+}
+
+.deck-drag-preview .card-back {
+    border-width: 3px;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
 }
 
 .card-rank {
